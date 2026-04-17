@@ -7,6 +7,7 @@ import logging
 import pandas as pd
 from entsoe import EntsoePandasClient
 import requests
+from typing import Callable
 
 LOGGER = logging.getLogger(__name__)
 
@@ -55,35 +56,87 @@ def _parse_renewables(raw: pd.Series | pd.DataFrame) -> pd.DataFrame:
     return frame[["timestamp_utc", "renewable_mw"]]
 
 
+def _fetch_in_chunks(
+    fetcher: Callable[[pd.Timestamp, pd.Timestamp], pd.Series | pd.DataFrame],
+    parser: Callable[[pd.Series | pd.DataFrame], pd.DataFrame],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    chunk_days: int,
+    label: str,
+) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    chunk_start = start
+    delta = pd.Timedelta(days=max(1, chunk_days))
+
+    while chunk_start < end:
+        chunk_end = min(chunk_start + delta, end)
+        LOGGER.info("Fetching ENTSO-E %s chunk %s -> %s", label, chunk_start.isoformat(), chunk_end.isoformat())
+        raw = fetcher(chunk_start, chunk_end)
+        frames.append(parser(raw))
+        chunk_start = chunk_end
+
+    if not frames:
+        return pd.DataFrame(columns=["timestamp_utc"])
+
+    merged = pd.concat(frames, ignore_index=True)
+    merged = merged.drop_duplicates(subset=["timestamp_utc"]).sort_values("timestamp_utc").reset_index(drop=True)
+    return merged
+
+
 def fetch_entsoe_energy_data(
     api_key: str,
     zone: str,
     start: pd.Timestamp,
     end: pd.Timestamp,
+    timeout_s: int = 90,
+    chunk_days: int = 30,
 ) -> pd.DataFrame:
     """Fetch day-ahead price, load and renewables from ENTSO-E."""
     session = requests.Session()
     session.trust_env = False
-    client = EntsoePandasClient(api_key=api_key, session=session, proxies={}, timeout=30)
+    client = EntsoePandasClient(api_key=api_key, session=session, proxies={}, timeout=timeout_s)
     start = _ensure_utc_timestamp(start)
     end = _ensure_utc_timestamp(end)
 
-    LOGGER.info("Fetching ENTSO-E day-ahead prices for %s", zone)
-    prices = client.query_day_ahead_prices(country_code=zone, start=start, end=end)
-    prices_df = _series_to_frame(prices, "price_eur_mwh")
-
-    LOGGER.info("Fetching ENTSO-E load forecast for %s", zone)
-    load = client.query_load_forecast(country_code=zone, start=start, end=end)
-    load_df = _series_to_frame(load, "demand_mw")
-
-    LOGGER.info("Fetching ENTSO-E renewable generation for %s", zone)
-    renewables = client.query_generation(
-        country_code=zone,
+    prices_df = _fetch_in_chunks(
+        fetcher=lambda chunk_start, chunk_end: client.query_day_ahead_prices(
+            country_code=zone,
+            start=chunk_start,
+            end=chunk_end,
+        ),
+        parser=lambda raw: _series_to_frame(raw, "price_eur_mwh"),
         start=start,
         end=end,
-        psr_type=None,
+        chunk_days=chunk_days,
+        label="day-ahead prices",
     )
-    renewables_df = _parse_renewables(renewables)
+
+    load_df = _fetch_in_chunks(
+        fetcher=lambda chunk_start, chunk_end: client.query_load_forecast(
+            country_code=zone,
+            start=chunk_start,
+            end=chunk_end,
+        ),
+        parser=lambda raw: _series_to_frame(raw, "demand_mw"),
+        start=start,
+        end=end,
+        chunk_days=chunk_days,
+        label="load forecast",
+    )
+
+    renewables_df = _fetch_in_chunks(
+        fetcher=lambda chunk_start, chunk_end: client.query_generation(
+            country_code=zone,
+            start=chunk_start,
+            end=chunk_end,
+            psr_type=None,
+        ),
+        parser=_parse_renewables,
+        start=start,
+        end=end,
+        chunk_days=chunk_days,
+        label="renewable generation",
+    )
 
     merged = prices_df.merge(load_df, on="timestamp_utc", how="outer").merge(
         renewables_df, on="timestamp_utc", how="outer"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import os
 
 import pandas as pd
 import streamlit as st
@@ -18,6 +19,16 @@ from scripts.run_all import run_workflow
 st.set_page_config(page_title="Energy Trading Dashboard", layout="wide")
 st.title("Energy Trading Dashboard")
 st.caption("Choose region, training window, and model; then run full pipeline.")
+
+with st.expander("Environment Diagnostics"):
+    st.write(
+        {
+            "python_executable": sys.executable,
+            "project_root": str(Path(__file__).parent.parent.resolve()),
+            "entsoe_api_key_loaded": bool(os.getenv("ENTSOE_API_KEY")),
+            "hf_token_loaded": bool(os.getenv("HF_TOKEN")),
+        }
+    )
 
 
 def _mode_label(value: str, mapping: dict[str, tuple[str, str]]) -> tuple[str, str]:

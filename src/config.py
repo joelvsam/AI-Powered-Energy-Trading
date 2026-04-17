@@ -30,6 +30,8 @@ class AppConfig:
     timezone_utc: str = "UTC"
 
     entsoe_api_key: str | None = os.getenv("ENTSOE_API_KEY")
+    entsoe_timeout_s: int = int(os.getenv("ENTSOE_TIMEOUT_S", "90"))
+    entsoe_chunk_days: int = int(os.getenv("ENTSOE_CHUNK_DAYS", "30"))
 
     hf_token: str | None = os.getenv("HF_TOKEN")
     hf_model: str = os.getenv("HF_MODEL", "Qwen/Qwen2.5-72B-Instruct")

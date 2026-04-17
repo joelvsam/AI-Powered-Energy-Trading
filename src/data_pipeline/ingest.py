@@ -114,6 +114,8 @@ def ingest_data(cfg: AppConfig, zone: str | None = None, lookback_days: int | No
             zone=selected_zone,
             start=start,
             end=end,
+            timeout_s=cfg.entsoe_timeout_s,
+            chunk_days=cfg.entsoe_chunk_days,
         )
     except Exception as exc:
         LOGGER.warning("ENTSO-E ingestion failed: %s", exc)
