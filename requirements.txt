@@ -1,0 +1,13 @@
+pandas
+numpy
+requests
+scikit-learn
+xgboost
+torch
+prophet
+streamlit
+plotly
+joblib
+python-dotenv
+huggingface_hub
+entsoe-py

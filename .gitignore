@@ -1,0 +1,28 @@
+# Data files
+data/raw/*.csv
+data/processed/*.csv
+*.db
+*.parquet
+
+# Artifacts
+artifacts/models/*
+artifacts/simulation/*
+*.joblib
+*.pkl
+*.json
+
+# Environment / secrets
+.env
+*.env
+*secret*
+*token*
+*credential*
+
+# Python cache
+__pycache__/
+*.pyc
+
+# System / IDE files
+.DS_Store
+.idea/
+.vscode/
