@@ -19,6 +19,16 @@ except Exception:  # pragma: no cover
     Prophet = None
 
 
+def _prepare_prophet_frame(df: pd.DataFrame, value_col: str | None, regressor_cols: list[str]) -> pd.DataFrame:
+    columns = ["timestamp_utc"] + ([] if value_col is None else [value_col]) + regressor_cols
+    frame = df[columns].copy()
+    frame["timestamp_utc"] = pd.to_datetime(frame["timestamp_utc"], utc=True, errors="coerce").dt.tz_localize(None)
+    renamed = {"timestamp_utc": "ds"}
+    if value_col is not None:
+        renamed[value_col] = "y"
+    return frame.rename(columns=renamed)
+
+
 def _fit_target(df: pd.DataFrame, y_col: str, regressor_cols: list[str]) -> tuple[object, dict]:
     if Prophet is None:
         raise RuntimeError("Prophet is required for prophet model. Please install prophet.")
@@ -26,7 +36,7 @@ def _fit_target(df: pd.DataFrame, y_col: str, regressor_cols: list[str]) -> tupl
     maes: list[float] = []
     rmses: list[float] = []
 
-    model_input = df[["timestamp_utc", y_col] + regressor_cols].rename(columns={"timestamp_utc": "ds", y_col: "y"})
+    model_input = _prepare_prophet_frame(df, y_col, regressor_cols)
 
     for train_idx, test_idx in splitter.split(model_input):
         model = Prophet(daily_seasonality=True, weekly_seasonality=True)
@@ -48,7 +58,7 @@ def _fit_target(df: pd.DataFrame, y_col: str, regressor_cols: list[str]) -> tupl
 
 
 def _predict(model: object, df: pd.DataFrame, regressor_cols: list[str]) -> np.ndarray:
-    pred_df = df[["timestamp_utc"] + regressor_cols].rename(columns={"timestamp_utc": "ds"})
+    pred_df = _prepare_prophet_frame(df, None, regressor_cols)
     return model.predict(pred_df)["yhat"].values
 
 

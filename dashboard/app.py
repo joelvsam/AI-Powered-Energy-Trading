@@ -4,46 +4,73 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import os
+import sys
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from dashboard.charts import render_backtest_chart, render_history_charts, render_prediction_chart
+from dashboard.backtesting_review import (
+    DEFAULT_BACKTESTING_DIR,
+    build_review_dataset,
+    filter_review_dataset,
+    load_backtest_artifacts,
+    run_backtest_from_csv,
+)
+from dashboard.charts import (
+    render_backtest_chart,
+    render_decision_review_table,
+    render_equity_chart,
+    render_history_charts,
+    render_prediction_chart,
+    render_review_accuracy_chart,
+)
 from scripts.run_all import run_workflow
 
-st.set_page_config(page_title="Energy Trading Dashboard", layout="wide")
-st.title("Energy Trading Dashboard")
-st.caption("Choose region, training window, and model; then run full pipeline.")
 
-with st.expander("Environment Diagnostics"):
-    st.write(
-        {
-            "python_executable": sys.executable,
-            "project_root": str(Path(__file__).parent.parent.resolve()),
-            "entsoe_api_key_loaded": bool(os.getenv("ENTSOE_API_KEY")),
-            "hf_token_loaded": bool(os.getenv("HF_TOKEN")),
-        }
-    )
+st.set_page_config(page_title="Energy Trading Dashboard", layout="wide")
 
 
 def _mode_label(value: str, mapping: dict[str, tuple[str, str]]) -> tuple[str, str]:
     normalized = (value or "").strip().lower()
     return mapping.get(normalized, (value or "Unknown", "secondary"))
 
-region = st.selectbox("Region", options=["DE_LU", "FR", "NL"], index=0)
-lookback_days = st.selectbox("Training Window (days)", options=[90, 180, 365], index=1)
-model = st.selectbox("Model", options=["xgboost", "lstm", "prophet"], index=0)
-horizon = st.slider("Simulation Horizon", min_value=12, max_value=168, value=24, step=12)
 
-if st.button("Run Pipeline", type="primary"):
-    args = argparse.Namespace(zone=region, lookback_days=lookback_days, simulation_horizon=horizon, model=model)
-    with st.spinner("Running pipeline... this may take a while."):
-        result = run_workflow(args)
+def _render_environment_diagnostics() -> None:
+    with st.expander("Environment Diagnostics"):
+        st.write(
+            {
+                "python_executable": sys.executable,
+                "project_root": str(Path(__file__).parent.parent.resolve()),
+                "entsoe_api_key_loaded": bool(os.getenv("ENTSOE_API_KEY")),
+                "hf_token_loaded": bool(os.getenv("HF_TOKEN")),
+            }
+        )
+
+
+def _render_pipeline_page() -> None:
+    st.title("Energy Trading Dashboard")
+    st.caption("Choose region, training window, and model; then run full pipeline.")
+    _render_environment_diagnostics()
+
+    region = st.selectbox("Region", options=["DE_LU", "FR", "NL"], index=0)
+    lookback_days = st.selectbox("Training Window (days)", options=[90, 180, 365], index=1)
+    model = st.selectbox("Model", options=["xgboost", "lstm", "prophet"], index=0)
+    horizon = st.slider("Simulation Horizon", min_value=12, max_value=168, value=24, step=12)
+
+    result = st.session_state.get("pipeline_result")
+    if st.button("Run Pipeline", type="primary"):
+        args = argparse.Namespace(zone=region, lookback_days=lookback_days, simulation_horizon=horizon, model=model)
+        with st.spinner("Running pipeline... this may take a while."):
+            result = run_workflow(args)
+        st.session_state["pipeline_result"] = result
+
+    if not result:
+        st.info("Run the pipeline to see model metrics, signals, and charts.")
+        return
 
     st.success("Pipeline completed")
     st.write(
@@ -135,3 +162,137 @@ if st.button("Run Pipeline", type="primary"):
 
     st.subheader("Decision Report")
     st.json(result["decision_report"])
+
+
+def _render_backtesting_review_page() -> None:
+    st.title("Backtesting Review")
+    st.caption("Review isolated backtest scores and compare past decisions against realized outcomes.")
+    _render_environment_diagnostics()
+
+    st.sidebar.subheader("Backtesting Review Controls")
+    load_mode = st.sidebar.radio("Review data source", options=["Latest saved artifacts", "Run from scored CSV"], index=0)
+    horizon_label = st.sidebar.selectbox("Accuracy horizon", options=["Next period", "Next 24 hours"], index=0)
+    hold_tolerance_pct = st.sidebar.slider(
+        "HOLD tolerance band (%)",
+        min_value=0.0,
+        max_value=2.0,
+        value=0.2,
+        step=0.1,
+        help="A HOLD is counted as directionally correct when the realized move stays within this percent band.",
+    )
+    horizon_steps = 1 if horizon_label == "Next period" else 24
+    hold_tolerance_decimal = hold_tolerance_pct / 100.0
+
+    review_df: pd.DataFrame | None = None
+    metrics: dict[str, object] = {}
+    analytics: dict[str, object] = {}
+
+    if load_mode == "Latest saved artifacts":
+        st.write(f"Loading isolated backtesting artifacts from `{DEFAULT_BACKTESTING_DIR}`.")
+        if st.button("Load Latest Backtest", type="primary"):
+            try:
+                review_df, metrics, analytics = load_backtest_artifacts()
+                st.session_state["review_payload"] = (review_df, metrics, analytics)
+                st.success("Loaded isolated backtesting artifacts.")
+            except FileNotFoundError as exc:
+                st.warning(str(exc))
+        elif "review_payload" in st.session_state:
+            review_df, metrics, analytics = st.session_state["review_payload"]
+    else:
+        input_path = st.text_input("Scored CSV path", value=str(DEFAULT_BACKTESTING_DIR / "backtest_results.csv"))
+        output_dir = st.text_input("Output directory", value=str(DEFAULT_BACKTESTING_DIR))
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            transaction_cost_bps = st.number_input("Transaction cost (bps)", min_value=0.0, value=5.0, step=1.0)
+        with c2:
+            annualization_factor = st.number_input("Annualization factor", min_value=1, value=24, step=1)
+        with c3:
+            notional_eur = st.number_input("Notional EUR", min_value=1000.0, value=10000.0, step=1000.0)
+        if st.button("Run Isolated Backtest", type="primary"):
+            try:
+                review_df, metrics, analytics = run_backtest_from_csv(
+                    input_path,
+                    output_dir=output_dir,
+                    transaction_cost_bps=float(transaction_cost_bps),
+                    annualization_factor=int(annualization_factor),
+                    notional_eur=float(notional_eur),
+                    accuracy_horizon_steps=horizon_steps,
+                    hold_tolerance_pct=hold_tolerance_decimal,
+                )
+                st.session_state["review_payload"] = (review_df, metrics, analytics)
+                st.success("Isolated backtest completed and saved.")
+            except (FileNotFoundError, ValueError, KeyError) as exc:
+                st.error(f"Unable to run isolated backtest: {exc}")
+        elif "review_payload" in st.session_state:
+            review_df, metrics, analytics = st.session_state["review_payload"]
+
+    if review_df is None:
+        st.info("Load the latest isolated artifacts or run an isolated backtest from a scored CSV to see review results.")
+        return
+
+    review_df, review_summary = build_review_dataset(
+        review_df,
+        horizon_steps=horizon_steps,
+        hold_tolerance_pct=hold_tolerance_decimal,
+    )
+
+    timestamps = pd.to_datetime(review_df["timestamp_utc"])
+    min_date = timestamps.min().date()
+    max_date = timestamps.max().date()
+    date_range = st.date_input("Filter date range", value=(min_date, max_date), min_value=min_date, max_value=max_date)
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        filtered_df = filter_review_dataset(review_df, start_date=date_range[0], end_date=date_range[1])
+    else:
+        filtered_df = review_df
+
+    if filtered_df.empty:
+        st.warning("No rows match the selected date range.")
+        return
+
+    st.subheader("Backtesting Scorecard")
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Sharpe", f"{float(metrics.get('sharpe_ratio', 0.0)):.3f}")
+    m2.metric("Max Drawdown", f"{float(metrics.get('max_drawdown', 0.0)):.3f}")
+    m3.metric("Hit Rate", f"{float(metrics.get('hit_rate', 0.0)):.3f}")
+    m4.metric("Total PnL", f"{float(metrics.get('total_pnl', 0.0)):.2f}")
+    m5.metric("Trade Count", f"{int(metrics.get('trade_count', 0))}")
+    m6.metric("Avg Trade Return", f"{float(metrics.get('average_trade_return', 0.0)):.4f}")
+
+    st.subheader("Decision Accuracy Review")
+    a1, a2, a3, a4, a5 = st.columns(5)
+    a1.metric("Directional Accuracy", f"{review_summary['directional_accuracy']:.3f}")
+    a2.metric("Positive PnL Rate", f"{review_summary['pnl_positive_rate']:.3f}")
+    a3.metric("Correct Decisions", f"{review_summary['correct_count']}")
+    a4.metric("Incorrect Decisions", f"{review_summary['incorrect_count']}")
+    a5.metric("Evaluable Rows", f"{review_summary['evaluable_rows']}")
+
+    distribution = review_summary["decision_distribution"]
+    d1, d2, d3 = st.columns(3)
+    d1.metric("LONG Count", f"{distribution['LONG']}")
+    d2.metric("SHORT Count", f"{distribution['SHORT']}")
+    d3.metric("HOLD Count", f"{distribution['HOLD']}")
+
+    st.caption(
+        f"Accuracy horizon: {review_summary['accuracy_horizon_steps']} step(s). HOLD tolerance band: {review_summary['hold_tolerance_pct'] * 100:.2f}%."
+    )
+
+    render_prediction_chart(filtered_df.tail(300))
+    render_equity_chart(filtered_df.tail(300))
+    render_review_accuracy_chart(filtered_df.tail(300))
+    render_decision_review_table(filtered_df.sort_values("timestamp_utc", ascending=False))
+
+    with st.expander("Accuracy Metadata"):
+        st.json(
+            {
+                "metrics": metrics,
+                "analytics": analytics,
+                "review_summary": review_summary,
+            }
+        )
+
+
+page = st.sidebar.radio("Menu", options=["Pipeline", "Backtesting Review"], index=0)
+if page == "Pipeline":
+    _render_pipeline_page()
+else:
+    _render_backtesting_review_page()
