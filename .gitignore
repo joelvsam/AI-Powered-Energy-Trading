@@ -7,6 +7,9 @@ data/processed/*.csv
 # Artifacts
 artifacts/models/*
 artifacts/simulation/*
+artifacts/backtesting/*
+artifacts/_test_backtesting/
+artifacts/_test_dashboard_review/
 *.joblib
 *.pkl
 *.json
@@ -26,3 +29,9 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Virtual environments
+.venv/
+
+# Local documentation notes
+BACKTESTING_BEGINNER_GUIDE.txt

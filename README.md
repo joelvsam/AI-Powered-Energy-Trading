@@ -83,6 +83,21 @@ In the dashboard you can select:
 Then click **Run Pipeline**.
 
 The dashboard surfaces the latest model-driven action (`LONG`, `SHORT`, or `HOLD`) together with the predicted market price in `EUR/MWh`.
+It also includes a separate **Backtesting Review** menu in the sidebar where you can load isolated backtest artifacts, run a new isolated backtest from a scored CSV, and compare past model decisions against realized price moves and PnL outcomes.
+
+Inside **Backtesting Review** you can:
+
+- Load the latest isolated backtest saved under `artifacts/backtesting/`
+- Run a fresh isolated backtest from a scored CSV path
+- Switch the accuracy horizon between the next period and next 24 hours
+- Adjust the `HOLD` tolerance band
+- Filter by date range and inspect whether each historical decision was correct
+
+Helpful defaults:
+
+- The main workflow now saves scored predictions under `artifacts/models/scored_predictions_<model>.csv`
+- If you have already run the simulation pipeline, `artifacts/simulation/backtest_trades.csv` is also a valid scored CSV input for isolated backtesting
+- `artifacts/backtesting/backtest_results.csv` is an isolated backtest output, not the recommended first-run source file
 
 ### Option B: Terminal
 
@@ -91,6 +106,26 @@ Run full pipeline:
 ```bash
 python -m scripts.run_all --lookback-days 180 --zone DE_LU --model xgboost --simulation-horizon 24
 ```
+
+### Option C: Isolated backtesting module
+
+Run the standalone backtester on a scored CSV without changing the current pipeline or dashboard behavior:
+
+```bash
+python scripts/run_backtest.py --input-path path/to/scored_predictions.csv --output-dir artifacts/backtesting
+```
+
+Required input columns:
+
+- `timestamp_utc`
+- `price_eur_mwh`
+- `pred_price_eur_mwh`
+- `pred_demand_kw`
+- `pred_renewable_mw`
+
+The command writes isolated results to `artifacts/backtesting/` and does not touch `artifacts/simulation/`.
+Those isolated outputs can then be opened in the dashboard's **Backtesting Review** page.
+The full training workflow also persists scored predictions to `artifacts/models/scored_predictions_<model>.csv` so you can reuse them here later.
 
 ## 5) Project Structure
 
@@ -112,6 +147,8 @@ src/
     train_xgb.py
     train_lstm.py
     train_prophet.py
+  backtesting/
+    engine.py
   trading/
     backtest.py
   simulation/
@@ -125,12 +162,14 @@ scripts/
 dashboard/
   app.py
   charts.py
+  backtesting_review.py
 data/
   raw/
   processed/
 artifacts/
   models/
   simulation/
+  backtesting/
 ```
 
 ## 6) Data Flow
@@ -143,6 +182,7 @@ artifacts/
 - `artifacts/simulation/backtest_metrics.json` stores trading metrics.
 - `artifacts/simulation/simulation_log.jsonl` stores simulated live predictions.
 - `artifacts/simulation/decision_report.json` stores final LLM/fallback decision.
+- `artifacts/backtesting/*` stores standalone offline backtesting results, metrics, and analytics.
 
 ## 7) Key Concepts Explained
 
@@ -175,6 +215,21 @@ Example decision report fields:
 - `risk_assessment`: risk note
 - `confidence`: value between 0 and 1
 - `source`: `huggingface` or `deterministic_fallback`
+
+Example isolated backtesting review fields:
+
+- `future_price_change_eur_mwh`
+- `future_price_return`
+- `directional_correct`
+- `accuracy_status`
+- `pnl_positive`
+
+Example isolated backtesting analytics:
+
+- `directional_accuracy`
+- `pnl_positive_rate`
+- `accuracy_horizon_steps`
+- `hold_tolerance_pct`
 
 ## 9) Troubleshooting
 
