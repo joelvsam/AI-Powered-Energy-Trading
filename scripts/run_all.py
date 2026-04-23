@@ -72,6 +72,7 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
         "scored_df": train_out.scored_df,
         "backtest_df": backtest_out.result_df,
         "metrics_path": train_out.metrics_path,
+        "scored_path": train_out.scored_path,
         "sim_path": sim_path,
         "decision_report": report,
     }

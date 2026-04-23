@@ -42,6 +42,7 @@ class AppConfig:
 
     tcost_bps: float = float(os.getenv("TCOST_BPS", "5.0"))
     annualization_factor: int = int(os.getenv("ANNUALIZATION_FACTOR", "24"))
+    backtest_notional_eur: float = float(os.getenv("BACKTEST_NOTIONAL_EUR", "10000.0"))
 
 
 def ensure_directories(cfg: AppConfig) -> None:
