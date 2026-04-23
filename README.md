@@ -1,4 +1,4 @@
-# AI-Powered Energy Trading (Beginner Friendly)
+# AI-Powered Energy Trading
 
 This project is a full **end-to-end data science workflow** that looks like what an energy trading team might use in production.
 
