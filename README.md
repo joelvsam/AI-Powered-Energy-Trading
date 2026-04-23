@@ -93,6 +93,12 @@ Inside **Backtesting Review** you can:
 - Adjust the `HOLD` tolerance band
 - Filter by date range and inspect whether each historical decision was correct
 
+Helpful defaults:
+
+- The main workflow now saves scored predictions under `artifacts/models/scored_predictions_<model>.csv`
+- If you have already run the simulation pipeline, `artifacts/simulation/backtest_trades.csv` is also a valid scored CSV input for isolated backtesting
+- `artifacts/backtesting/backtest_results.csv` is an isolated backtest output, not the recommended first-run source file
+
 ### Option B: Terminal
 
 Run full pipeline:
@@ -119,6 +125,7 @@ Required input columns:
 
 The command writes isolated results to `artifacts/backtesting/` and does not touch `artifacts/simulation/`.
 Those isolated outputs can then be opened in the dashboard's **Backtesting Review** page.
+The full training workflow also persists scored predictions to `artifacts/models/scored_predictions_<model>.csv` so you can reuse them here later.
 
 ## 5) Project Structure
 

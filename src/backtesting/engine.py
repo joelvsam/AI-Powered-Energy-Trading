@@ -10,6 +10,10 @@ import numpy as np
 import pandas as pd
 
 
+MIN_EQUITY_FLOOR = 1e-6
+MAX_PERIOD_RETURN = 1.0 - MIN_EQUITY_FLOOR
+
+
 @dataclass(frozen=True)
 class BacktestConfig:
     """Configuration for isolated backtesting runs."""
@@ -46,14 +50,30 @@ def compute_sharpe(returns: pd.Series, annualization_factor: int) -> float:
 
 def compute_max_drawdown(equity: pd.Series) -> float:
     """Compute the maximum drawdown from an equity curve."""
-    peak = equity.cummax()
-    drawdown = (equity - peak) / peak
+    clean_equity = pd.to_numeric(equity, errors="coerce").fillna(1.0).clip(lower=MIN_EQUITY_FLOOR)
+    peak = clean_equity.cummax()
+    drawdown = (clean_equity - peak) / peak
     return float(drawdown.min())
 
 
 def compute_trade_count(decisions: pd.Series) -> int:
     """Count non-hold trade decisions."""
     return int(decisions.isin(["LONG", "SHORT"]).sum())
+
+
+def compute_price_change(prices: pd.Series) -> pd.Series:
+    """Compute absolute price changes in EUR/MWh."""
+    clean_prices = pd.to_numeric(prices, errors="coerce")
+    return clean_prices.diff().fillna(0.0)
+
+
+def compute_price_return(prices: pd.Series, scale_floor: float = 1.0) -> pd.Series:
+    """Compute a stable normalized price-move series for reporting."""
+    clean_prices = pd.to_numeric(prices, errors="coerce")
+    previous = clean_prices.shift(1)
+    denominator = previous.abs().clip(lower=scale_floor)
+    returns = (clean_prices - previous) / denominator
+    return returns.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
 def compute_turnover_summary(turnover: pd.Series) -> dict[str, float]:
@@ -86,6 +106,38 @@ def _decision_series(position: pd.Series, long_threshold: float, short_threshold
     )
 
 
+def _reference_price_scale(prices: pd.Series) -> float:
+    clean_abs = pd.to_numeric(prices, errors="coerce").abs()
+    positive = clean_abs[clean_abs > 0]
+    if positive.empty:
+        return 1.0
+    return float(max(positive.median(), 1.0))
+
+
+def _simulate_equity_curve(net_pnl_eur: pd.Series, initial_equity_eur: float) -> tuple[pd.Series, pd.Series, pd.Series]:
+    equity_values: list[float] = []
+    realized_pnl_values: list[float] = []
+    strategy_returns: list[float] = []
+
+    equity = max(float(initial_equity_eur), 1.0)
+    for raw_pnl in net_pnl_eur.fillna(0.0):
+        normalized_return = float(raw_pnl) / equity if equity > 0 else 0.0
+        clipped_return = min(max(normalized_return, -1.0 + MIN_EQUITY_FLOOR), MAX_PERIOD_RETURN)
+        next_equity = max(equity * (1.0 + clipped_return), MIN_EQUITY_FLOOR)
+        realized_pnl = next_equity - equity
+        strategy_returns.append(clipped_return)
+        realized_pnl_values.append(realized_pnl)
+        equity_values.append(next_equity)
+        equity = next_equity
+
+    index = net_pnl_eur.index
+    return (
+        pd.Series(strategy_returns, index=index),
+        pd.Series(realized_pnl_values, index=index),
+        pd.Series(equity_values, index=index),
+    )
+
+
 def evaluate_decision_accuracy(
     result_df: pd.DataFrame,
     *,
@@ -102,9 +154,9 @@ def evaluate_decision_accuracy(
     future_price = df["price_eur_mwh"].shift(-horizon_steps)
     df["future_price_eur_mwh"] = future_price
     df["future_price_change_eur_mwh"] = future_price - df["price_eur_mwh"]
-    denominator = df["price_eur_mwh"].replace(0, np.nan)
-    df["future_price_return"] = (df["future_price_change_eur_mwh"] / denominator).fillna(0.0)
-    df["pnl_positive"] = df["strategy_return"] > 0
+    denominator = pd.to_numeric(df["price_eur_mwh"], errors="coerce").abs().clip(lower=1.0)
+    df["future_price_return"] = (df["future_price_change_eur_mwh"] / denominator).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    df["pnl_positive"] = df["pnl"] > 0
 
     valid_future = future_price.notna()
     abs_return = df["future_price_return"].abs()
@@ -138,11 +190,11 @@ def evaluate_decision_accuracy(
     return df, summary
 
 
-def run_backtest(scored_df: pd.DataFrame, config: BacktestConfig) -> BacktestResult:
-    """Run an isolated offline backtest from an already-scored dataframe."""
+def generate_backtest_outputs(scored_df: pd.DataFrame, config: BacktestConfig) -> tuple[pd.DataFrame, dict[str, float | int], dict[str, object]]:
+    """Generate a backtest dataframe plus summary metrics without writing files."""
     _validate_columns(scored_df)
 
-    df = scored_df.copy().sort_values("timestamp_utc")
+    df = scored_df.copy().sort_values("timestamp_utc").reset_index(drop=True)
     df["imbalance_pred"] = df["pred_demand_kw"] / 1000.0 - df["pred_renewable_mw"]
     df["price_trend"] = df["price_eur_mwh"].diff().fillna(0.0)
     df["pred_price_delta"] = df["pred_price_eur_mwh"] - df["price_eur_mwh"]
@@ -152,13 +204,25 @@ def run_backtest(scored_df: pd.DataFrame, config: BacktestConfig) -> BacktestRes
     df["position"] = np.tanh(raw_signal / 10.0)
     df["decision"] = _decision_series(df["position"], config.long_threshold, config.short_threshold)
 
-    df["price_return"] = df["price_eur_mwh"].pct_change().fillna(0.0)
+    reference_price_eur_mwh = _reference_price_scale(df["price_eur_mwh"])
+    exposure_mwh = config.notional_eur / reference_price_eur_mwh
+    df["price_change_eur_mwh"] = compute_price_change(df["price_eur_mwh"])
+    df["price_return"] = df["price_change_eur_mwh"] / reference_price_eur_mwh
     df["turnover"] = df["position"].diff().abs().fillna(df["position"].abs())
-    transaction_cost = config.transaction_cost_bps / 10000.0
-    df["strategy_return"] = df["position"].shift(1).fillna(0.0) * df["price_return"] - transaction_cost * df["turnover"]
-    df["pnl"] = df["strategy_return"] * config.notional_eur
-    df["cumulative_returns"] = (1.0 + df["strategy_return"]).cumprod() - 1.0
-    df["equity_curve"] = (1.0 + df["strategy_return"]).cumprod()
+    transaction_cost_rate = config.transaction_cost_bps / 10000.0
+    df["gross_pnl_eur"] = df["position"].shift(1).fillna(0.0) * df["price_change_eur_mwh"] * exposure_mwh
+    df["transaction_cost_eur"] = df["turnover"] * config.notional_eur * transaction_cost_rate
+    df["net_pnl_eur"] = df["gross_pnl_eur"] - df["transaction_cost_eur"]
+
+    strategy_return, realized_pnl_eur, equity_eur = _simulate_equity_curve(df["net_pnl_eur"], config.notional_eur)
+    initial_equity = max(float(config.notional_eur), 1.0)
+    df["strategy_return"] = strategy_return
+    df["pnl"] = realized_pnl_eur
+    df["equity_eur"] = equity_eur
+    df["equity_curve"] = equity_eur / initial_equity
+    df["cumulative_returns"] = df["equity_curve"] - 1.0
+    df["reference_price_eur_mwh"] = reference_price_eur_mwh
+    df["exposure_mwh"] = exposure_mwh
 
     df, accuracy_summary = evaluate_decision_accuracy(
         df,
@@ -196,7 +260,16 @@ def run_backtest(scored_df: pd.DataFrame, config: BacktestConfig) -> BacktestRes
         "accuracy_summary": accuracy_summary,
         "accuracy_horizon_steps": int(config.accuracy_horizon_steps),
         "hold_tolerance_pct": float(config.hold_tolerance_pct),
+        "reference_price_eur_mwh": float(reference_price_eur_mwh),
+        "initial_equity_eur": float(initial_equity),
+        "exposure_mwh": float(exposure_mwh),
     }
+    return df, metrics, analytics
+
+
+def run_backtest(scored_df: pd.DataFrame, config: BacktestConfig) -> BacktestResult:
+    """Run an isolated offline backtest from an already-scored dataframe."""
+    df, metrics, analytics = generate_backtest_outputs(scored_df, config)
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
     results_path = config.output_dir / "backtest_results.csv"

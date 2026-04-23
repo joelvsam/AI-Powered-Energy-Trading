@@ -22,11 +22,16 @@ except Exception:  # pragma: no cover
     nn = None
 
 
-class LSTMRegressor(nn.Module):
+_LSTM_BASE = nn.Module if nn is not None else object
+
+
+class LSTMRegressor(_LSTM_BASE):
     """Simple LSTM regressor for one-step forecasting."""
 
     def __init__(self, input_dim: int, hidden_dim: int = 32) -> None:
         super().__init__()
+        if nn is None:
+            raise RuntimeError("PyTorch is required for LSTM model. Please install torch.")
         self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden_dim, batch_first=True)
         self.head = nn.Sequential(
             nn.Linear(hidden_dim, 16),

@@ -16,9 +16,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from dashboard.backtesting_review import (
     DEFAULT_BACKTESTING_DIR,
     build_review_dataset,
+    default_scored_csv_path,
     filter_review_dataset,
     load_backtest_artifacts,
+    load_model_comparison,
     run_backtest_from_csv,
+    run_model_comparison_workflow,
 )
 from dashboard.charts import (
     render_backtest_chart,
@@ -164,72 +167,7 @@ def _render_pipeline_page() -> None:
     st.json(result["decision_report"])
 
 
-def _render_backtesting_review_page() -> None:
-    st.title("Backtesting Review")
-    st.caption("Review isolated backtest scores and compare past decisions against realized outcomes.")
-    _render_environment_diagnostics()
-
-    st.sidebar.subheader("Backtesting Review Controls")
-    load_mode = st.sidebar.radio("Review data source", options=["Latest saved artifacts", "Run from scored CSV"], index=0)
-    horizon_label = st.sidebar.selectbox("Accuracy horizon", options=["Next period", "Next 24 hours"], index=0)
-    hold_tolerance_pct = st.sidebar.slider(
-        "HOLD tolerance band (%)",
-        min_value=0.0,
-        max_value=2.0,
-        value=0.2,
-        step=0.1,
-        help="A HOLD is counted as directionally correct when the realized move stays within this percent band.",
-    )
-    horizon_steps = 1 if horizon_label == "Next period" else 24
-    hold_tolerance_decimal = hold_tolerance_pct / 100.0
-
-    review_df: pd.DataFrame | None = None
-    metrics: dict[str, object] = {}
-    analytics: dict[str, object] = {}
-
-    if load_mode == "Latest saved artifacts":
-        st.write(f"Loading isolated backtesting artifacts from `{DEFAULT_BACKTESTING_DIR}`.")
-        if st.button("Load Latest Backtest", type="primary"):
-            try:
-                review_df, metrics, analytics = load_backtest_artifacts()
-                st.session_state["review_payload"] = (review_df, metrics, analytics)
-                st.success("Loaded isolated backtesting artifacts.")
-            except FileNotFoundError as exc:
-                st.warning(str(exc))
-        elif "review_payload" in st.session_state:
-            review_df, metrics, analytics = st.session_state["review_payload"]
-    else:
-        input_path = st.text_input("Scored CSV path", value=str(DEFAULT_BACKTESTING_DIR / "backtest_results.csv"))
-        output_dir = st.text_input("Output directory", value=str(DEFAULT_BACKTESTING_DIR))
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            transaction_cost_bps = st.number_input("Transaction cost (bps)", min_value=0.0, value=5.0, step=1.0)
-        with c2:
-            annualization_factor = st.number_input("Annualization factor", min_value=1, value=24, step=1)
-        with c3:
-            notional_eur = st.number_input("Notional EUR", min_value=1000.0, value=10000.0, step=1000.0)
-        if st.button("Run Isolated Backtest", type="primary"):
-            try:
-                review_df, metrics, analytics = run_backtest_from_csv(
-                    input_path,
-                    output_dir=output_dir,
-                    transaction_cost_bps=float(transaction_cost_bps),
-                    annualization_factor=int(annualization_factor),
-                    notional_eur=float(notional_eur),
-                    accuracy_horizon_steps=horizon_steps,
-                    hold_tolerance_pct=hold_tolerance_decimal,
-                )
-                st.session_state["review_payload"] = (review_df, metrics, analytics)
-                st.success("Isolated backtest completed and saved.")
-            except (FileNotFoundError, ValueError, KeyError) as exc:
-                st.error(f"Unable to run isolated backtest: {exc}")
-        elif "review_payload" in st.session_state:
-            review_df, metrics, analytics = st.session_state["review_payload"]
-
-    if review_df is None:
-        st.info("Load the latest isolated artifacts or run an isolated backtest from a scored CSV to see review results.")
-        return
-
+def _render_review_details(review_df: pd.DataFrame, metrics: dict[str, object], analytics: dict[str, object], *, horizon_steps: int, hold_tolerance_decimal: float) -> None:
     review_df, review_summary = build_review_dataset(
         review_df,
         horizon_steps=horizon_steps,
@@ -289,6 +227,183 @@ def _render_backtesting_review_page() -> None:
                 "review_summary": review_summary,
             }
         )
+
+
+def _render_backtesting_review_page() -> None:
+    st.title("Backtesting Review")
+    st.caption("Review isolated backtest scores and compare past decisions against realized outcomes.")
+    _render_environment_diagnostics()
+
+    st.sidebar.subheader("Backtesting Review Controls")
+    load_mode = st.sidebar.radio(
+        "Review data source",
+        options=["Latest saved artifacts", "Run from scored CSV", "Compare trained models"],
+        index=0,
+    )
+    horizon_label = st.sidebar.selectbox("Accuracy horizon", options=["Next period", "Next 24 hours"], index=0)
+    hold_tolerance_pct = st.sidebar.slider(
+        "HOLD tolerance band (%)",
+        min_value=0.0,
+        max_value=2.0,
+        value=0.2,
+        step=0.1,
+        help="A HOLD is counted as directionally correct when the realized move stays within this percent band.",
+    )
+    horizon_steps = 1 if horizon_label == "Next period" else 24
+    hold_tolerance_decimal = hold_tolerance_pct / 100.0
+
+    review_df: pd.DataFrame | None = None
+    metrics: dict[str, object] = {}
+    analytics: dict[str, object] = {}
+
+    if load_mode == "Latest saved artifacts":
+        st.write(f"Loading isolated backtesting artifacts from `{DEFAULT_BACKTESTING_DIR}`.")
+        if st.button("Load Latest Backtest", type="primary"):
+            try:
+                review_df, metrics, analytics = load_backtest_artifacts()
+                st.session_state["review_payload"] = (review_df, metrics, analytics)
+                st.success("Loaded isolated backtesting artifacts.")
+            except FileNotFoundError as exc:
+                st.warning(str(exc))
+        elif "review_payload" in st.session_state:
+            review_df, metrics, analytics = st.session_state["review_payload"]
+    elif load_mode == "Run from scored CSV":
+        input_path = st.text_input("Scored CSV path", value=str(default_scored_csv_path()))
+        st.caption(
+            "Use a scored predictions CSV such as `artifacts/models/scored_predictions_<model>.csv` "
+            "or `artifacts/simulation/backtest_trades.csv`. Do not use `artifacts/backtesting/backtest_results.csv` "
+            "as the source unless it already exists from a previous isolated run."
+        )
+        output_dir = st.text_input("Output directory", value=str(DEFAULT_BACKTESTING_DIR))
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            transaction_cost_bps = st.number_input("Transaction cost (bps)", min_value=0.0, value=5.0, step=1.0)
+        with c2:
+            annualization_factor = st.number_input("Annualization factor", min_value=1, value=24, step=1)
+        with c3:
+            notional_eur = st.number_input("Notional EUR", min_value=1000.0, value=10000.0, step=1000.0)
+        if st.button("Run Isolated Backtest", type="primary"):
+            try:
+                review_df, metrics, analytics = run_backtest_from_csv(
+                    input_path,
+                    output_dir=output_dir,
+                    transaction_cost_bps=float(transaction_cost_bps),
+                    annualization_factor=int(annualization_factor),
+                    notional_eur=float(notional_eur),
+                    accuracy_horizon_steps=horizon_steps,
+                    hold_tolerance_pct=hold_tolerance_decimal,
+                )
+                st.session_state["review_payload"] = (review_df, metrics, analytics)
+                st.success("Isolated backtest completed and saved.")
+            except (FileNotFoundError, ValueError, KeyError) as exc:
+                st.error(f"Unable to run isolated backtest: {exc}")
+        elif "review_payload" in st.session_state:
+            review_df, metrics, analytics = st.session_state["review_payload"]
+    else:
+        st.write("Train xgboost, lstm, and prophet on the same dataset, then compare them by directional accuracy.")
+        output_dir = st.text_input("Comparison output directory", value=str(DEFAULT_BACKTESTING_DIR))
+        c1, c2 = st.columns(2)
+        with c1:
+            comparison_region = st.selectbox("Comparison region", options=["DE_LU", "FR", "NL"], index=0)
+        with c2:
+            comparison_lookback_days = st.selectbox("Comparison training window (days)", options=[90, 180, 365], index=1)
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            transaction_cost_bps = st.number_input("Transaction cost (bps)", min_value=0.0, value=5.0, step=1.0, key="comparison_tcost")
+        with c2:
+            annualization_factor = st.number_input("Annualization factor", min_value=1, value=24, step=1, key="comparison_annualization")
+        with c3:
+            notional_eur = st.number_input("Notional EUR", min_value=1000.0, value=10000.0, step=1000.0, key="comparison_notional")
+        comparison_summary_df: pd.DataFrame | None = None
+        comparison_metadata: dict[str, object] = {}
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Run Model Comparison", type="primary"):
+                try:
+                    comparison_summary_df, comparison_metadata = run_model_comparison_workflow(
+                        zone=comparison_region,
+                        lookback_days=int(comparison_lookback_days),
+                        output_dir=output_dir,
+                        transaction_cost_bps=float(transaction_cost_bps),
+                        annualization_factor=int(annualization_factor),
+                        notional_eur=float(notional_eur),
+                        accuracy_horizon_steps=horizon_steps,
+                        hold_tolerance_pct=hold_tolerance_decimal,
+                    )
+                    st.session_state["comparison_payload"] = (comparison_summary_df, comparison_metadata)
+                    st.success("Model comparison completed and saved.")
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Unable to run model comparison: {exc}")
+        with c2:
+            if st.button("Load Saved Comparison"):
+                try:
+                    comparison_summary_df, comparison_metadata = load_model_comparison(output_dir)
+                    st.session_state["comparison_payload"] = (comparison_summary_df, comparison_metadata)
+                    st.success("Loaded saved model comparison.")
+                except FileNotFoundError as exc:
+                    st.warning(str(exc))
+
+        if comparison_summary_df is None and "comparison_payload" in st.session_state:
+            comparison_summary_df, comparison_metadata = st.session_state["comparison_payload"]
+
+        if comparison_summary_df is None or comparison_summary_df.empty:
+            st.info("Run the three-model comparison or load a saved comparison to see ranked results.")
+            return
+
+        winner_model = comparison_metadata.get("winner_model")
+        if winner_model:
+            st.success(f"Top model by directional accuracy: {winner_model}")
+        if comparison_metadata.get("energy_source"):
+            st.caption(
+                f"Region: {comparison_metadata.get('zone')} | Training window: {comparison_metadata.get('lookback_days')} days | "
+                f"Energy source: {comparison_metadata.get('energy_source')}"
+            )
+        comparison_columns = [
+            "rank",
+            "model_key",
+            "directional_accuracy",
+            "correct_count",
+            "incorrect_count",
+            "pnl_positive_rate",
+            "total_pnl",
+            "sharpe_ratio",
+            "max_drawdown",
+            "hit_rate",
+            "price_mae",
+            "price_rmse",
+        ]
+        st.subheader("Model Comparison")
+        st.dataframe(
+            comparison_summary_df[[column for column in comparison_columns if column in comparison_summary_df.columns]],
+            use_container_width=True,
+        )
+        failure_rows = comparison_metadata.get("failures", [])
+        if failure_rows:
+            st.warning(f"Some models failed during comparison: {failure_rows}")
+
+        selected_model = st.selectbox("Inspect model", options=list(comparison_summary_df["model_key"]))
+        selected_row = comparison_summary_df.loc[comparison_summary_df["model_key"] == selected_model].iloc[0]
+        review_df, metrics, analytics = load_backtest_artifacts(selected_row["backtest_output_dir"])
+        training_metrics_path = Path(str(selected_row["training_metrics_path"]))
+        if training_metrics_path.exists():
+            training_metrics = json.loads(training_metrics_path.read_text(encoding="utf-8"))
+            price_metrics = training_metrics.get("price", {})
+            st.subheader("Forecast Metrics")
+            f1, f2 = st.columns(2)
+            f1.metric("Price MAE", f"{float(price_metrics.get('mae', float('nan'))):.3f}")
+            f2.metric("Price RMSE", f"{float(price_metrics.get('rmse', float('nan'))):.3f}")
+        _render_review_details(review_df, metrics, analytics, horizon_steps=horizon_steps, hold_tolerance_decimal=hold_tolerance_decimal)
+        return
+
+    if review_df is None:
+        st.info(
+            "Load the latest isolated artifacts or run an isolated backtest from a scored CSV. "
+            "If this is your first isolated run, a good starting input is `artifacts/simulation/backtest_trades.csv`."
+        )
+        return
+
+    _render_review_details(review_df, metrics, analytics, horizon_steps=horizon_steps, hold_tolerance_decimal=hold_tolerance_decimal)
 
 
 page = st.sidebar.radio("Menu", options=["Pipeline", "Backtesting Review"], index=0)
