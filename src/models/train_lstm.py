@@ -8,11 +8,11 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error
-from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 
 from src.config import AppConfig
 from src.models.base import TrainingOutputs
+from src.models.walk_forward import iter_walk_forward_windows
 
 try:
     import torch
@@ -69,56 +69,92 @@ def _train_model(model: LSTMRegressor, x_train: torch.Tensor, y_train: torch.Ten
         optimizer.step()
 
 
-def _fit_target(X: pd.DataFrame, y: pd.Series, seed: int) -> tuple[LSTMRegressor, StandardScaler, dict]:
-    splitter = TimeSeriesSplit(n_splits=5)
-    maes: list[float] = []
-    rmses: list[float] = []
+def _fit_target(
+    X: pd.DataFrame,
+    y: pd.Series,
+    timestamps: pd.Series,
+    *,
+    seed: int,
+    train_window_days: int,
+    test_window_days: int,
+) -> tuple[LSTMRegressor, StandardScaler, pd.Series, dict[str, float]]:
+    walk_df = pd.DataFrame({"timestamp_utc": timestamps}).reset_index(drop=True)
+    windows = iter_walk_forward_windows(
+        walk_df,
+        train_window_days=train_window_days,
+        test_window_days=test_window_days,
+    )
+    predictions = pd.Series(np.nan, index=X.index, dtype=float)
+    actuals: list[float] = []
+    preds: list[float] = []
 
-    scaler = StandardScaler()
-    X_scaled_full = scaler.fit_transform(X)
-
-    for train_idx, test_idx in splitter.split(X_scaled_full):
+    for window in windows:
+        scaler = StandardScaler()
+        train_slice = slice(window.train_start, window.train_end)
+        test_slice = slice(window.test_start, window.test_end)
+        X_train = scaler.fit_transform(X.iloc[train_slice])
+        X_test = scaler.transform(X.iloc[test_slice])
         model = _build_model(input_dim=X.shape[1], seed=seed)
-        x_train, y_train = _to_tensors(X_scaled_full[train_idx], y.iloc[train_idx].values)
-        x_test, y_test = _to_tensors(X_scaled_full[test_idx], y.iloc[test_idx].values)
+        x_train, y_train = _to_tensors(X_train, y.iloc[train_slice].values)
+        x_test, y_test = _to_tensors(X_test, y.iloc[test_slice].values)
         _train_model(model, x_train, y_train, epochs=8)
         model.eval()
         with torch.no_grad():
-            pred = model(x_test).view(-1).cpu().numpy()
+            fold_pred = model(x_test).view(-1).cpu().numpy()
         y_test_np = y_test.view(-1).cpu().numpy()
-        maes.append(float(mean_absolute_error(y_test_np, pred)))
-        rmses.append(float(np.sqrt(mean_squared_error(y_test_np, pred))))
+        predictions.iloc[test_slice] = fold_pred
+        actuals.extend(y_test_np.tolist())
+        preds.extend(fold_pred.tolist())
 
+    final_scaler = StandardScaler()
+    X_scaled_full = final_scaler.fit_transform(X)
     final_model = _build_model(input_dim=X.shape[1], seed=seed)
     final_x, final_y = _to_tensors(X_scaled_full, y.values)
     _train_model(final_model, final_x, final_y, epochs=10)
 
-    metrics = {"mae": float(np.mean(maes)), "rmse": float(np.mean(rmses))}
-    return final_model, scaler, metrics
-
-
-def _predict(model: LSTMRegressor, scaler: StandardScaler, X: pd.DataFrame) -> np.ndarray:
-    scaled = scaler.transform(X)
-    x_tensor = torch.tensor(scaled, dtype=torch.float32).unsqueeze(1)
-    model.eval()
-    with torch.no_grad():
-        pred = model(x_tensor).view(-1).cpu().numpy()
-    return pred
+    metrics = {
+        "mae": float(mean_absolute_error(actuals, preds)),
+        "rmse": float(np.sqrt(mean_squared_error(actuals, preds))),
+    }
+    return final_model, final_scaler, predictions, metrics
 
 
 def train_lstm_models(features_df: pd.DataFrame, cfg: AppConfig) -> TrainingOutputs:
-    df = features_df.copy().sort_values("timestamp_utc")
+    df = features_df.copy().sort_values("timestamp_utc").reset_index(drop=True)
     target_cols = {"timestamp_utc", "demand_kw", "renewable_mw", "price_eur_mwh"}
     feature_cols = [c for c in df.columns if c not in target_cols]
     X = df[feature_cols]
+    timestamps = df["timestamp_utc"]
 
-    demand_model, demand_scaler, demand_metrics = _fit_target(X, df["demand_kw"], cfg.random_seed)
-    renewable_model, renewable_scaler, renewable_metrics = _fit_target(X, df["renewable_mw"], cfg.random_seed)
-    price_model, price_scaler, price_metrics = _fit_target(X, df["price_eur_mwh"], cfg.random_seed)
+    demand_model, demand_scaler, demand_pred, demand_metrics = _fit_target(
+        X,
+        df["demand_kw"],
+        timestamps,
+        seed=cfg.random_seed,
+        train_window_days=cfg.walk_forward_train_window_days,
+        test_window_days=cfg.walk_forward_test_window_days,
+    )
+    renewable_model, renewable_scaler, renewable_pred, renewable_metrics = _fit_target(
+        X,
+        df["renewable_mw"],
+        timestamps,
+        seed=cfg.random_seed,
+        train_window_days=cfg.walk_forward_train_window_days,
+        test_window_days=cfg.walk_forward_test_window_days,
+    )
+    price_model, price_scaler, price_pred, price_metrics = _fit_target(
+        X,
+        df["price_eur_mwh"],
+        timestamps,
+        seed=cfg.random_seed,
+        train_window_days=cfg.walk_forward_train_window_days,
+        test_window_days=cfg.walk_forward_test_window_days,
+    )
 
-    df["pred_demand_kw"] = _predict(demand_model, demand_scaler, X)
-    df["pred_renewable_mw"] = _predict(renewable_model, renewable_scaler, X)
-    df["pred_price_eur_mwh"] = _predict(price_model, price_scaler, X)
+    df["pred_demand_kw"] = demand_pred
+    df["pred_renewable_mw"] = renewable_pred
+    df["pred_price_eur_mwh"] = price_pred
+    df = df.dropna(subset=["pred_demand_kw", "pred_renewable_mw", "pred_price_eur_mwh"]).reset_index(drop=True)
 
     demand_path = cfg.models_dir / "demand_lstm.pt"
     renewable_path = cfg.models_dir / "renewable_lstm.pt"

@@ -8,6 +8,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_numeric_dtype
+
+from src.trading.signal import SignalConfig, compute_signal_frame, decision_from_position
 
 
 MIN_EQUITY_FLOOR = 1e-6
@@ -26,6 +29,11 @@ class BacktestConfig:
     notional_eur: float = 10000.0
     accuracy_horizon_steps: int = 1
     hold_tolerance_pct: float = 0.002
+    enable_new_signal: bool = True
+    signal_volatility_window_hours: int = 24
+    signal_position_scale_k: float = 2.0
+    enable_volatility_scaling: bool = True
+    enable_execution_delay: bool = True
 
 
 @dataclass(frozen=True)
@@ -56,9 +64,13 @@ def compute_max_drawdown(equity: pd.Series) -> float:
     return float(drawdown.min())
 
 
-def compute_trade_count(decisions: pd.Series) -> int:
-    """Count non-hold trade decisions."""
-    return int(decisions.isin(["LONG", "SHORT"]).sum())
+def compute_trade_count(position: pd.Series, tolerance: float = 1e-6) -> int:
+    """Count rebalances based on realized position changes."""
+    if not is_numeric_dtype(position):
+        return int(position.isin(["LONG", "SHORT"]).sum())
+    numeric = pd.to_numeric(position, errors="coerce").fillna(0.0)
+    turnover = numeric.diff().abs().fillna(numeric.abs())
+    return int((turnover > tolerance).sum())
 
 
 def compute_price_change(prices: pd.Series) -> pd.Series:
@@ -99,19 +111,19 @@ def _validate_columns(scored_df: pd.DataFrame) -> None:
         raise ValueError(f"Scored dataframe is missing required columns: {missing}")
 
 
-def _decision_series(position: pd.Series, long_threshold: float, short_threshold: float) -> pd.Series:
-    return pd.Series(
-        np.where(position > long_threshold, "LONG", np.where(position < short_threshold, "SHORT", "HOLD")),
-        index=position.index,
-    )
-
-
 def _reference_price_scale(prices: pd.Series) -> float:
     clean_abs = pd.to_numeric(prices, errors="coerce").abs()
     positive = clean_abs[clean_abs > 0]
     if positive.empty:
         return 1.0
     return float(max(positive.median(), 1.0))
+
+
+def _threshold_decision_series(position: pd.Series, long_threshold: float, short_threshold: float) -> pd.Series:
+    return pd.Series(
+        np.where(position > long_threshold, "LONG", np.where(position < short_threshold, "SHORT", "HOLD")),
+        index=position.index,
+    )
 
 
 def _simulate_equity_curve(net_pnl_eur: pd.Series, initial_equity_eur: float) -> tuple[pd.Series, pd.Series, pd.Series]:
@@ -190,27 +202,45 @@ def evaluate_decision_accuracy(
     return df, summary
 
 
+def _build_signal_config(config: BacktestConfig) -> SignalConfig:
+    return SignalConfig(
+        volatility_window_hours=config.signal_volatility_window_hours,
+        position_scale_k=config.signal_position_scale_k,
+        enable_new_signal=config.enable_new_signal,
+        enable_volatility_scaling=config.enable_volatility_scaling,
+        long_threshold=config.long_threshold,
+        short_threshold=config.short_threshold,
+    )
+
+
 def generate_backtest_outputs(scored_df: pd.DataFrame, config: BacktestConfig) -> tuple[pd.DataFrame, dict[str, float | int], dict[str, object]]:
     """Generate a backtest dataframe plus summary metrics without writing files."""
     _validate_columns(scored_df)
 
     df = scored_df.copy().sort_values("timestamp_utc").reset_index(drop=True)
-    df["imbalance_pred"] = df["pred_demand_kw"] / 1000.0 - df["pred_renewable_mw"]
-    df["price_trend"] = df["price_eur_mwh"].diff().fillna(0.0)
-    df["pred_price_delta"] = df["pred_price_eur_mwh"] - df["price_eur_mwh"]
-
-    raw_signal = 0.06 * df["imbalance_pred"] + 0.4 * df["pred_price_delta"]
-    df["signal_strength"] = raw_signal
-    df["position"] = np.tanh(raw_signal / 10.0)
-    df["decision"] = _decision_series(df["position"], config.long_threshold, config.short_threshold)
-
+    df = compute_signal_frame(df, _build_signal_config(config))
     reference_price_eur_mwh = _reference_price_scale(df["price_eur_mwh"])
     exposure_mwh = config.notional_eur / reference_price_eur_mwh
+    transaction_cost_rate = config.transaction_cost_bps / 10000.0
+
     df["price_change_eur_mwh"] = compute_price_change(df["price_eur_mwh"])
     df["price_return"] = df["price_change_eur_mwh"] / reference_price_eur_mwh
+    df["forward_price_change_eur_mwh"] = pd.to_numeric(df["price_eur_mwh"], errors="coerce").shift(-1) - pd.to_numeric(
+        df["price_eur_mwh"], errors="coerce"
+    )
+    df["forward_price_change_eur_mwh"] = df["forward_price_change_eur_mwh"].fillna(0.0)
+
+    if config.enable_execution_delay:
+        df["position"] = df["target_position"].shift(1).fillna(0.0)
+    else:
+        df["position"] = df["target_position"].fillna(0.0)
+    df["position"] = pd.to_numeric(df["position"], errors="coerce").clip(-1.0, 1.0).fillna(0.0)
+    if config.enable_new_signal:
+        df["decision"] = decision_from_position(df["position"])
+    else:
+        df["decision"] = _threshold_decision_series(df["position"], config.long_threshold, config.short_threshold)
     df["turnover"] = df["position"].diff().abs().fillna(df["position"].abs())
-    transaction_cost_rate = config.transaction_cost_bps / 10000.0
-    df["gross_pnl_eur"] = df["position"].shift(1).fillna(0.0) * df["price_change_eur_mwh"] * exposure_mwh
+    df["gross_pnl_eur"] = df["position"] * df["forward_price_change_eur_mwh"] * exposure_mwh
     df["transaction_cost_eur"] = df["turnover"] * config.notional_eur * transaction_cost_rate
     df["net_pnl_eur"] = df["gross_pnl_eur"] - df["transaction_cost_eur"]
 
@@ -243,7 +273,7 @@ def generate_backtest_outputs(scored_df: pd.DataFrame, config: BacktestConfig) -
         "max_drawdown": compute_max_drawdown(df["equity_curve"]),
         "hit_rate": float((df["strategy_return"] > 0).sum() / max(nonzero_return_mask.sum(), 1)),
         "total_pnl": float(df["pnl"].sum()),
-        "trade_count": compute_trade_count(df["decision"]),
+        "trade_count": compute_trade_count(df["position"]),
         "average_trade_return": float(df.loc[trade_mask, "strategy_return"].mean()) if trade_mask.any() else 0.0,
         "directional_accuracy": float(accuracy_summary["directional_accuracy"]),
         "pnl_positive_rate": float(accuracy_summary["pnl_positive_rate"]),
@@ -263,6 +293,11 @@ def generate_backtest_outputs(scored_df: pd.DataFrame, config: BacktestConfig) -
         "reference_price_eur_mwh": float(reference_price_eur_mwh),
         "initial_equity_eur": float(initial_equity),
         "exposure_mwh": float(exposure_mwh),
+        "enable_new_signal": bool(config.enable_new_signal),
+        "enable_execution_delay": bool(config.enable_execution_delay),
+        "signal_volatility_window_hours": int(config.signal_volatility_window_hours),
+        "signal_position_scale_k": float(config.signal_position_scale_k),
+        "enable_volatility_scaling": bool(config.enable_volatility_scaling),
     }
     return df, metrics, analytics
 

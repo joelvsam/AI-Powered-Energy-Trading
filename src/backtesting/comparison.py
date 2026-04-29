@@ -111,6 +111,11 @@ def run_model_comparison(
                     notional_eur=notional_eur if notional_eur is not None else cfg.backtest_notional_eur,
                     accuracy_horizon_steps=accuracy_horizon_steps,
                     hold_tolerance_pct=hold_tolerance_pct,
+                    enable_new_signal=cfg.enable_new_signal,
+                    signal_volatility_window_hours=cfg.signal_volatility_window_hours,
+                    signal_position_scale_k=cfg.signal_position_scale_k,
+                    enable_volatility_scaling=cfg.enable_volatility_scaling,
+                    enable_execution_delay=cfg.enable_execution_delay,
                 ),
             )
             accuracy_summary = backtest_result.analytics.get("accuracy_summary", {})

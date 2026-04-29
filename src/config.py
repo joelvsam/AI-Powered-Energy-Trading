@@ -43,6 +43,13 @@ class AppConfig:
     tcost_bps: float = float(os.getenv("TCOST_BPS", "5.0"))
     annualization_factor: int = int(os.getenv("ANNUALIZATION_FACTOR", "24"))
     backtest_notional_eur: float = float(os.getenv("BACKTEST_NOTIONAL_EUR", "10000.0"))
+    enable_new_signal: bool = os.getenv("ENABLE_NEW_SIGNAL", "true").strip().lower() in {"1", "true", "yes", "on"}
+    signal_volatility_window_hours: int = int(os.getenv("SIGNAL_VOL_WINDOW_HOURS", "24"))
+    signal_position_scale_k: float = float(os.getenv("SIGNAL_POSITION_SCALE_K", "2.0"))
+    enable_volatility_scaling: bool = os.getenv("ENABLE_VOLATILITY_SCALING", "true").strip().lower() in {"1", "true", "yes", "on"}
+    enable_execution_delay: bool = os.getenv("ENABLE_EXECUTION_DELAY", "true").strip().lower() in {"1", "true", "yes", "on"}
+    walk_forward_train_window_days: int = int(os.getenv("WALK_FORWARD_TRAIN_WINDOW_DAYS", "90"))
+    walk_forward_test_window_days: int = int(os.getenv("WALK_FORWARD_TEST_WINDOW_DAYS", "7"))
 
 
 def ensure_directories(cfg: AppConfig) -> None:

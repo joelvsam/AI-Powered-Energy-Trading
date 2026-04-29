@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from src.agents.decision_agent import run_decision_agent
+from src.backtesting.engine import BacktestConfig, generate_backtest_outputs
 from src.config import AppConfig, ensure_directories, set_global_seed, setup_logging
 from src.data_pipeline.run_pipeline import run_data_pipeline
 from src.features.build_features import build_features
@@ -46,6 +47,24 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
 
     logging.info("4/8 Backtesting")
     backtest_out = run_backtest(train_out.scored_df, cfg)
+    _, legacy_metrics, _ = generate_backtest_outputs(
+        train_out.scored_df,
+        BacktestConfig(
+            output_dir=cfg.simulation_dir,
+            transaction_cost_bps=cfg.tcost_bps,
+            annualization_factor=cfg.annualization_factor,
+            long_threshold=0.1,
+            short_threshold=-0.1,
+            notional_eur=cfg.backtest_notional_eur,
+            accuracy_horizon_steps=1,
+            hold_tolerance_pct=0.002,
+            enable_new_signal=False,
+            signal_volatility_window_hours=cfg.signal_volatility_window_hours,
+            signal_position_scale_k=cfg.signal_position_scale_k,
+            enable_volatility_scaling=False,
+            enable_execution_delay=False,
+        ),
+    )
 
     logging.info("5/8 Realtime simulation")
     sim_path = run_realtime_simulation(
@@ -71,6 +90,10 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
         "features_df": features,
         "scored_df": train_out.scored_df,
         "backtest_df": backtest_out.result_df,
+        "strategy_comparison": {
+            "old": legacy_metrics,
+            "new": backtest_out.metrics,
+        },
         "metrics_path": train_out.metrics_path,
         "scored_path": train_out.scored_path,
         "sim_path": sim_path,

@@ -29,10 +29,15 @@ def build_features(df: pd.DataFrame, cfg: AppConfig) -> pd.DataFrame:
         out[f"{col}_lag_24"] = out[col].shift(24)
         out[f"{col}_roll_mean_24"] = out[col].rolling(24).mean()
         out[f"{col}_roll_std_24"] = out[col].rolling(24).std()
+        out[f"{col}_ramp_1h"] = out[col].diff(1)
+        out[f"{col}_ramp_24h"] = out[col].diff(24)
 
     out["renewable_penetration"] = out["renewable_mw"] / (out["demand_kw"] / 1000.0 + 1e-6)
     out["price_momentum"] = out["price_eur_mwh"].pct_change().replace([np.inf, -np.inf], 0.0)
     out["demand_delta"] = out["demand_kw"].diff()
+    out["demand_ramp_1h"] = out["demand_kw"].diff(1)
+    out["renewable_ramp_1h"] = out["renewable_mw"].diff(1)
+    out["price_ramp_1h"] = out["price_eur_mwh"].diff(1)
 
     weather_cols = ["temperature_c", "wind_speed_mps", "radiation_wm2", "humidity_pct"]
     for col in weather_cols:

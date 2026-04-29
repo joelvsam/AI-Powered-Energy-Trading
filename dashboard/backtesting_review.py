@@ -77,6 +77,11 @@ def run_backtest_from_csv(
 ) -> tuple[pd.DataFrame, dict, dict]:
     """Run the isolated backtester directly from a scored CSV."""
     scored_df = pd.read_csv(input_path, parse_dates=["timestamp_utc"])
+    cfg = AppConfig(
+        tcost_bps=transaction_cost_bps,
+        annualization_factor=annualization_factor,
+        backtest_notional_eur=notional_eur,
+    )
     result = run_backtest(
         scored_df,
         BacktestConfig(
@@ -88,6 +93,11 @@ def run_backtest_from_csv(
             notional_eur=notional_eur,
             accuracy_horizon_steps=accuracy_horizon_steps,
             hold_tolerance_pct=hold_tolerance_pct,
+            enable_new_signal=cfg.enable_new_signal,
+            signal_volatility_window_hours=cfg.signal_volatility_window_hours,
+            signal_position_scale_k=cfg.signal_position_scale_k,
+            enable_volatility_scaling=cfg.enable_volatility_scaling,
+            enable_execution_delay=cfg.enable_execution_delay,
         ),
     )
     return result.result_df, result.metrics, result.analytics
@@ -105,12 +115,22 @@ def run_model_comparison_workflow(
     notional_eur: float = 10000.0,
     accuracy_horizon_steps: int = 1,
     hold_tolerance_pct: float = 0.002,
+    enable_new_signal: bool = True,
+    signal_volatility_window_hours: int = 24,
+    signal_position_scale_k: float = 2.0,
+    enable_volatility_scaling: bool = True,
+    enable_execution_delay: bool = True,
 ) -> tuple[pd.DataFrame, dict]:
     """Run the shared data pipeline once, then compare xgboost, lstm, and prophet."""
     cfg = AppConfig(
         tcost_bps=transaction_cost_bps,
         annualization_factor=annualization_factor,
         backtest_notional_eur=notional_eur,
+        enable_new_signal=enable_new_signal,
+        signal_volatility_window_hours=signal_volatility_window_hours,
+        signal_position_scale_k=signal_position_scale_k,
+        enable_volatility_scaling=enable_volatility_scaling,
+        enable_execution_delay=enable_execution_delay,
     )
     ensure_directories(cfg)
     set_global_seed(cfg.random_seed)

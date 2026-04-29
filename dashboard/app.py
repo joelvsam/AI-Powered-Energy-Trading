@@ -56,7 +56,7 @@ def _render_environment_diagnostics() -> None:
 
 def _render_pipeline_page() -> None:
     st.title("Energy Trading Dashboard")
-    st.caption("Choose region, training window, and model; then run full pipeline.")
+    st.caption("Choose region, training window, and model; then run the full volatility-aware trading pipeline.")
     _render_environment_diagnostics()
 
     region = st.selectbox("Region", options=["DE_LU", "FR", "NL"], index=0)
@@ -149,7 +149,7 @@ def _render_pipeline_page() -> None:
 
     latest_signal = backtest_df.sort_values("timestamp_utc").iloc[-1]
     st.subheader("Latest Trading Signal")
-    s1, s2, s3, s4 = st.columns(4)
+    s1, s2, s3, s4, s5 = st.columns(5)
     s1.metric("Recommended Action", str(latest_signal["decision"]))
     s2.metric("Predicted Price", f"{latest_signal['pred_price_eur_mwh']:.2f} EUR/MWh")
     s3.metric(
@@ -157,7 +157,18 @@ def _render_pipeline_page() -> None:
         f"{latest_signal['price_eur_mwh']:.2f} EUR/MWh",
         delta=f"{latest_signal['pred_price_eur_mwh'] - latest_signal['price_eur_mwh']:.2f} EUR/MWh",
     )
-    s4.metric("Predicted Imbalance", f"{latest_signal['imbalance_pred']:.2f} MW")
+    s4.metric("Executed Position", f"{latest_signal['position']:.3f}")
+    s5.metric("Predicted Imbalance", f"{latest_signal['imbalance_pred']:.2f} MW")
+
+    strategy_comparison = result.get("strategy_comparison", {})
+    if strategy_comparison:
+        st.subheader("Strategy Comparison")
+        old_metrics = strategy_comparison.get("old", {})
+        new_metrics = strategy_comparison.get("new", {})
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Sharpe Improvement", f"{float(new_metrics.get('sharpe_ratio', 0.0)) - float(old_metrics.get('sharpe_ratio', 0.0)):.3f}")
+        c2.metric("Drawdown Improvement", f"{float(new_metrics.get('max_drawdown', 0.0)) - float(old_metrics.get('max_drawdown', 0.0)):.3f}")
+        c3.metric("Trade Frequency Change", f"{int(new_metrics.get('trade_count', 0)) - int(old_metrics.get('trade_count', 0))}")
 
     render_history_charts(features_df.tail(300))
     render_prediction_chart(scored_df.tail(300))

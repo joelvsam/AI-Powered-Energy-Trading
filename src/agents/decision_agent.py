@@ -12,12 +12,14 @@ import pandas as pd
 from src.agents.llm_utils import generate_response
 from src.agents.prompts import build_market_prompt
 from src.config import AppConfig
+from src.trading.signal import decision_from_position
 
 
 def _latest_market_state(backtest_df: pd.DataFrame) -> dict[str, Any]:
     row = backtest_df.sort_values("timestamp_utc").iloc[-1]
     current_price = float(row["price_eur_mwh"])
     predicted_price = float(row["pred_price_eur_mwh"])
+    latest_position = float(row.get("position", 0.0))
     return {
         "timestamp_utc": row["timestamp_utc"].isoformat() if hasattr(row["timestamp_utc"], "isoformat") else str(row["timestamp_utc"]),
         "pred_demand_kw": float(row["pred_demand_kw"]),
@@ -28,14 +30,17 @@ def _latest_market_state(backtest_df: pd.DataFrame) -> dict[str, Any]:
         "expected_price_change_eur_mwh": predicted_price - current_price,
         "expected_price_change_pct": float((predicted_price - current_price) / current_price) if current_price else 0.0,
         "price_trend": float(row.get("price_trend", 0.0)),
-        "recommended_position": str(row.get("decision", "HOLD")),
+        "rolling_volatility": float(row.get("rolling_volatility", 0.0)),
+        "signal_z_score": float(row.get("signal_z_score", 0.0)),
+        "recommended_position": latest_position,
+        "recommended_action": decision_from_position(pd.Series([latest_position])).iloc[0],
     }
 
 
 def run_decision_agent(backtest_df: pd.DataFrame, cfg: AppConfig) -> dict[str, Any]:
     market_state = _latest_market_state(backtest_df)
     prompt = build_market_prompt(market_state)
-    decision = generate_response(prompt=prompt, market_state=market_state, cfg=cfg)
+    decision = generate_response(prompt=prompt, market_state=market_state, historical_df=backtest_df, cfg=cfg)
     report = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "market_state": market_state,

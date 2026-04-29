@@ -3,37 +3,20 @@
 from __future__ import annotations
 
 import json
+
 import joblib
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error
-from sklearn.model_selection import TimeSeriesSplit
 from xgboost import XGBRegressor
 
 from src.config import AppConfig
 from src.models.base import TrainingOutputs
+from src.models.walk_forward import iter_walk_forward_windows
 
 
-def _fit_target(X: pd.DataFrame, y: pd.Series, seed: int) -> tuple[XGBRegressor, dict]:
-    splitter = TimeSeriesSplit(n_splits=5)
-    maes: list[float] = []
-    rmses: list[float] = []
-
-    for train_idx, test_idx in splitter.split(X):
-        model = XGBRegressor(
-            n_estimators=300,
-            max_depth=6,
-            learning_rate=0.05,
-            subsample=0.9,
-            colsample_bytree=0.9,
-            random_state=seed,
-        )
-        model.fit(X.iloc[train_idx], y.iloc[train_idx])
-        pred = model.predict(X.iloc[test_idx])
-        maes.append(mean_absolute_error(y.iloc[test_idx], pred))
-        rmses.append(float(np.sqrt(mean_squared_error(y.iloc[test_idx], pred))))
-
-    final_model = XGBRegressor(
+def _build_model(seed: int) -> XGBRegressor:
+    return XGBRegressor(
         n_estimators=300,
         max_depth=6,
         learning_rate=0.05,
@@ -41,24 +24,82 @@ def _fit_target(X: pd.DataFrame, y: pd.Series, seed: int) -> tuple[XGBRegressor,
         colsample_bytree=0.9,
         random_state=seed,
     )
+
+
+def _fit_target(
+    X: pd.DataFrame,
+    y: pd.Series,
+    timestamps: pd.Series,
+    *,
+    seed: int,
+    train_window_days: int,
+    test_window_days: int,
+) -> tuple[XGBRegressor, pd.Series, dict[str, float]]:
+    walk_df = pd.DataFrame({"timestamp_utc": timestamps}).reset_index(drop=True)
+    windows = iter_walk_forward_windows(
+        walk_df,
+        train_window_days=train_window_days,
+        test_window_days=test_window_days,
+    )
+    predictions = pd.Series(np.nan, index=X.index, dtype=float)
+    actuals: list[float] = []
+    preds: list[float] = []
+
+    for window in windows:
+        model = _build_model(seed)
+        train_slice = slice(window.train_start, window.train_end)
+        test_slice = slice(window.test_start, window.test_end)
+        model.fit(X.iloc[train_slice], y.iloc[train_slice])
+        fold_pred = model.predict(X.iloc[test_slice])
+        predictions.iloc[test_slice] = fold_pred
+        actuals.extend(y.iloc[test_slice].tolist())
+        preds.extend(fold_pred.tolist())
+
+    final_model = _build_model(seed)
     final_model.fit(X, y)
-    metrics = {"mae": float(np.mean(maes)), "rmse": float(np.mean(rmses))}
-    return final_model, metrics
+    metrics = {
+        "mae": float(mean_absolute_error(actuals, preds)),
+        "rmse": float(np.sqrt(mean_squared_error(actuals, preds))),
+    }
+    return final_model, predictions, metrics
 
 
 def train_xgb_models(features_df: pd.DataFrame, cfg: AppConfig) -> TrainingOutputs:
-    df = features_df.copy().sort_values("timestamp_utc")
+    df = features_df.copy().sort_values("timestamp_utc").reset_index(drop=True)
     target_cols = {"timestamp_utc", "demand_kw", "renewable_mw", "price_eur_mwh"}
     feature_cols = [c for c in df.columns if c not in target_cols]
     X = df[feature_cols]
+    timestamps = df["timestamp_utc"]
 
-    demand_model, demand_metrics = _fit_target(X, df["demand_kw"], cfg.random_seed)
-    renewable_model, renewable_metrics = _fit_target(X, df["renewable_mw"], cfg.random_seed)
-    price_model, price_metrics = _fit_target(X, df["price_eur_mwh"], cfg.random_seed)
+    demand_model, demand_pred, demand_metrics = _fit_target(
+        X,
+        df["demand_kw"],
+        timestamps,
+        seed=cfg.random_seed,
+        train_window_days=cfg.walk_forward_train_window_days,
+        test_window_days=cfg.walk_forward_test_window_days,
+    )
+    renewable_model, renewable_pred, renewable_metrics = _fit_target(
+        X,
+        df["renewable_mw"],
+        timestamps,
+        seed=cfg.random_seed,
+        train_window_days=cfg.walk_forward_train_window_days,
+        test_window_days=cfg.walk_forward_test_window_days,
+    )
+    price_model, price_pred, price_metrics = _fit_target(
+        X,
+        df["price_eur_mwh"],
+        timestamps,
+        seed=cfg.random_seed,
+        train_window_days=cfg.walk_forward_train_window_days,
+        test_window_days=cfg.walk_forward_test_window_days,
+    )
 
-    df["pred_demand_kw"] = demand_model.predict(X)
-    df["pred_renewable_mw"] = renewable_model.predict(X)
-    df["pred_price_eur_mwh"] = price_model.predict(X)
+    df["pred_demand_kw"] = demand_pred
+    df["pred_renewable_mw"] = renewable_pred
+    df["pred_price_eur_mwh"] = price_pred
+    df = df.dropna(subset=["pred_demand_kw", "pred_renewable_mw", "pred_price_eur_mwh"]).reset_index(drop=True)
 
     demand_path = cfg.models_dir / "demand_xgboost.joblib"
     renewable_path = cfg.models_dir / "renewable_xgboost.joblib"

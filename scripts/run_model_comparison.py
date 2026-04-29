@@ -28,6 +28,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--notional-eur", type=float, default=10000.0, help="Backtest notional used for pnl scaling.")
     parser.add_argument("--accuracy-horizon-steps", type=int, default=1, help="Future step horizon used for decision-accuracy scoring.")
     parser.add_argument("--hold-tolerance-pct", type=float, default=0.002, help="Absolute return band for HOLD directional accuracy.")
+    parser.add_argument("--enable-new-signal", choices=["true", "false"], default="true", help="Use the volatility-normalized continuous signal.")
+    parser.add_argument("--signal-volatility-window-hours", type=int, default=24, help="Rolling volatility window used by the continuous signal.")
+    parser.add_argument("--signal-position-scale-k", type=float, default=2.0, help="Scale factor that maps signal z-scores into positions.")
+    parser.add_argument("--disable-volatility-scaling", action="store_true", help="Turn off exposure reduction in high-volatility regimes.")
+    parser.add_argument("--disable-execution-delay", action="store_true", help="Execute signals immediately instead of at t+1.")
     return parser.parse_args()
 
 
@@ -44,6 +49,11 @@ def main() -> None:
         notional_eur=args.notional_eur,
         accuracy_horizon_steps=args.accuracy_horizon_steps,
         hold_tolerance_pct=args.hold_tolerance_pct,
+        enable_new_signal=args.enable_new_signal == "true",
+        signal_volatility_window_hours=args.signal_volatility_window_hours,
+        signal_position_scale_k=args.signal_position_scale_k,
+        enable_volatility_scaling=not args.disable_volatility_scaling,
+        enable_execution_delay=not args.disable_execution_delay,
     )
     print("Model Comparison Summary")
     print(summary_df.to_string(index=False) if not summary_df.empty else "No successful model runs.")
