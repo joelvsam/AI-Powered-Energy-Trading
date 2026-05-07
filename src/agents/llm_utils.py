@@ -8,7 +8,10 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from huggingface_hub import InferenceClient
+try:
+    from huggingface_hub import InferenceClient  # type: ignore
+except Exception:  # pragma: no cover
+    InferenceClient = None  # type: ignore[assignment]
 
 from src.config import AppConfig
 from src.trading.signal import decision_from_position
@@ -104,6 +107,9 @@ def generate_response(
     cfg: AppConfig,
 ) -> dict[str, Any]:
     """Generate LLM response or fallback decision."""
+    if InferenceClient is None:
+        LOGGER.warning("huggingface_hub not installed. Using deterministic fallback.")
+        return deterministic_fallback(market_state, historical_df)
     if not cfg.hf_token:
         LOGGER.warning("HF_TOKEN missing. Using deterministic fallback.")
         return deterministic_fallback(market_state, historical_df)
@@ -139,3 +145,42 @@ def generate_response(
     except Exception as exc:
         LOGGER.warning("Hugging Face inference failed: %s", exc)
         return deterministic_fallback(market_state, historical_df)
+
+
+def generate_json_response(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    fallback_payload: dict[str, Any],
+    cfg: AppConfig,
+) -> dict[str, Any]:
+    """Generate structured JSON for research helpers with deterministic fallback."""
+    if InferenceClient is None:
+        payload = dict(fallback_payload)
+        payload["source"] = payload.get("source", "deterministic_fallback")
+        return payload
+    if not cfg.hf_token or not cfg.llm_optional_mode:
+        payload = dict(fallback_payload)
+        payload["source"] = payload.get("source", "deterministic_fallback")
+        return payload
+
+    try:
+        client = InferenceClient(token=cfg.hf_token, timeout=cfg.hf_timeout_s)
+        response = client.chat_completion(
+            model=cfg.hf_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=700,
+            temperature=0.2,
+        )
+        content = response.choices[0].message.content if response.choices else ""
+        parsed = json.loads(content)
+        parsed["source"] = "huggingface"
+        return parsed
+    except Exception as exc:
+        LOGGER.warning("Structured Hugging Face inference failed: %s", exc)
+        payload = dict(fallback_payload)
+        payload["source"] = payload.get("source", "deterministic_fallback")
+        return payload

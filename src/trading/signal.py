@@ -13,9 +13,17 @@ class SignalConfig:
     """Configuration for transforming forecasts into tradable positions."""
 
     volatility_window_hours: int = 24
+    equilibrium_window_hours: int = 72
     position_scale_k: float = 2.0
+    imbalance_scale: float = 8.0
     enable_new_signal: bool = True
     enable_volatility_scaling: bool = True
+    enable_regime_switching: bool = True
+    forecast_weight: float = 0.45
+    mean_reversion_weight: float = 0.30
+    fundamental_weight: float = 0.25
+    high_vol_regime_quantile: float = 0.7
+    position_limit: float = 1.0
     long_threshold: float = 0.1
     short_threshold: float = -0.1
 
@@ -32,41 +40,111 @@ def decision_from_position(position: pd.Series, tolerance: float = 1e-6) -> pd.S
 def compute_signal_frame(df: pd.DataFrame, config: SignalConfig) -> pd.DataFrame:
     """Compute signal diagnostics and target positions from model forecasts."""
     out = df.copy()
+    out["day_ahead_price_eur_mwh"] = pd.to_numeric(
+        out.get("day_ahead_price_eur_mwh", out["price_eur_mwh"]),
+        errors="coerce",
+    )
+    out["intraday_price_eur_mwh"] = pd.to_numeric(
+        out.get("intraday_price_eur_mwh", out["price_eur_mwh"]),
+        errors="coerce",
+    )
     out["pred_price_delta"] = pd.to_numeric(out["pred_price_eur_mwh"], errors="coerce") - pd.to_numeric(
         out["price_eur_mwh"], errors="coerce"
     )
     out["imbalance_pred"] = pd.to_numeric(out["pred_demand_kw"], errors="coerce") / 1000.0 - pd.to_numeric(
         out["pred_renewable_mw"], errors="coerce"
     )
+    out["net_load_mw"] = pd.to_numeric(out.get("demand_kw", out["pred_demand_kw"]), errors="coerce") / 1000.0 - pd.to_numeric(
+        out.get("renewable_mw", out["pred_renewable_mw"]),
+        errors="coerce",
+    )
+    out["intraday_day_ahead_spread_eur_mwh"] = out["intraday_price_eur_mwh"] - out["day_ahead_price_eur_mwh"]
     out["price_trend"] = pd.to_numeric(out["price_eur_mwh"], errors="coerce").diff().fillna(0.0)
 
+    rolling_volatility = (
+        pd.to_numeric(out["price_eur_mwh"], errors="coerce")
+        .rolling(config.volatility_window_hours, min_periods=max(2, config.volatility_window_hours // 2))
+        .std()
+        .bfill()
+        .ffill()
+        .fillna(0.0)
+    )
+    equilibrium_price = (
+        pd.to_numeric(out["price_eur_mwh"], errors="coerce")
+        .rolling(config.equilibrium_window_hours, min_periods=max(6, config.equilibrium_window_hours // 3))
+        .median()
+        .bfill()
+        .ffill()
+    )
+    out["rolling_volatility"] = rolling_volatility
+    out["equilibrium_price_eur_mwh"] = equilibrium_price
+    out["forecast_signal"] = out["pred_price_delta"] / (rolling_volatility + 1e-6)
+    out["mean_reversion_signal"] = -1.0 * (
+        (pd.to_numeric(out["price_eur_mwh"], errors="coerce") - equilibrium_price) / (rolling_volatility + 1e-6)
+    )
+    out["fundamental_signal"] = (
+        (out["imbalance_pred"] - out["net_load_mw"].rolling(config.equilibrium_window_hours, min_periods=6).mean().bfill().ffill())
+        / max(config.imbalance_scale, 1e-6)
+    )
+    out["spread_signal"] = (
+        out["intraday_day_ahead_spread_eur_mwh"]
+        / (out["intraday_day_ahead_spread_eur_mwh"].rolling(config.volatility_window_hours, min_periods=4).std().bfill().ffill() + 1e-6)
+    )
+    out["vol_regime"] = np.where(
+        rolling_volatility
+        > rolling_volatility.rolling(config.equilibrium_window_hours, min_periods=6).quantile(config.high_vol_regime_quantile).bfill().ffill(),
+        "high_vol",
+        "low_vol",
+    )
+    out["market_regime"] = np.where(
+        out["price_trend"].rolling(config.volatility_window_hours, min_periods=4).mean().abs()
+        > rolling_volatility.rolling(config.volatility_window_hours, min_periods=4).mean().fillna(0.0) * 0.3,
+        "trend",
+        "mean_revert",
+    )
+
     if config.enable_new_signal:
-        rolling_volatility = (
-            pd.to_numeric(out["price_eur_mwh"], errors="coerce")
-            .rolling(config.volatility_window_hours, min_periods=max(2, config.volatility_window_hours // 2))
-            .std()
-            .bfill()
-            .ffill()
-            .fillna(0.0)
+        combined_signal = (
+            config.forecast_weight * out["forecast_signal"]
+            + config.mean_reversion_weight * out["mean_reversion_signal"]
+            + config.fundamental_weight * (out["fundamental_signal"] - 0.25 * out["spread_signal"])
         )
-        out["rolling_volatility"] = rolling_volatility
-        out["signal_z_score"] = out["pred_price_delta"] / (rolling_volatility + 1e-6)
-        out["signal_strength"] = out["signal_z_score"]
-        raw_position = (out["signal_z_score"] / max(config.position_scale_k, 1e-6)).clip(-1.0, 1.0)
+        if config.enable_regime_switching:
+            combined_signal = np.where(
+                out["market_regime"] == "trend",
+                config.forecast_weight * out["forecast_signal"] + config.fundamental_weight * out["fundamental_signal"],
+                config.mean_reversion_weight * out["mean_reversion_signal"] + config.fundamental_weight * out["fundamental_signal"],
+            )
+            combined_signal = pd.Series(combined_signal, index=out.index)
+        out["combined_signal"] = pd.to_numeric(combined_signal, errors="coerce").fillna(0.0)
+        out["signal_z_score"] = out["combined_signal"]
+        out["signal_strength"] = out["combined_signal"]
+        raw_position = np.tanh(out["combined_signal"] / max(config.position_scale_k, 1e-6))
         if config.enable_volatility_scaling:
             raw_position = raw_position / (1.0 + rolling_volatility)
-        out["target_position"] = raw_position.clip(-1.0, 1.0)
+        high_vol_mask = out["vol_regime"] == "high_vol"
+        raw_position = pd.Series(raw_position, index=out.index)
+        raw_position.loc[high_vol_mask] = raw_position.loc[high_vol_mask] * 0.65
+        out["target_position_raw"] = raw_position
+        out["target_position_capped"] = pd.to_numeric(out["target_position_raw"], errors="coerce").clip(
+            -abs(config.position_limit), abs(config.position_limit)
+        )
+        out["target_position"] = out["target_position_capped"]
     else:
         raw_signal = 0.06 * out["imbalance_pred"] + 0.4 * out["pred_price_delta"]
-        out["rolling_volatility"] = (
-            pd.to_numeric(out["price_eur_mwh"], errors="coerce")
-            .rolling(config.volatility_window_hours, min_periods=2)
-            .std()
-            .fillna(0.0)
-        )
+        out["forecast_signal"] = out["pred_price_delta"]
+        out["mean_reversion_signal"] = 0.0
+        out["fundamental_signal"] = out["imbalance_pred"] / max(config.imbalance_scale, 1e-6)
+        out["combined_signal"] = raw_signal
         out["signal_z_score"] = 0.0
         out["signal_strength"] = raw_signal
-        out["target_position"] = np.tanh(raw_signal / 10.0)
+        out["target_position_raw"] = np.tanh(raw_signal / 10.0)
+        out["target_position_capped"] = pd.to_numeric(out["target_position_raw"], errors="coerce").clip(
+            -abs(config.position_limit), abs(config.position_limit)
+        )
+        out["target_position"] = out["target_position_capped"]
+        out["vol_regime"] = "low_vol"
+        out["market_regime"] = "trend"
 
     out["target_position"] = pd.to_numeric(out["target_position"], errors="coerce").clip(-1.0, 1.0).fillna(0.0)
     out["target_decision"] = decision_from_position(out["target_position"])

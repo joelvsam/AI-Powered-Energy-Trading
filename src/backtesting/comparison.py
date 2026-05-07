@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
 
-from src.backtesting.engine import BacktestConfig, run_backtest
 from src.config import AppConfig
+from src.backtesting.strategy_comparison import run_strategy_comparison
 from src.models.model_registry import MODEL_REGISTRY, train_with_model
 
 
@@ -19,22 +20,24 @@ COMPARISON_JSON_NAME = "model_comparison_summary.json"
 SUMMARY_COLUMNS = [
     "rank",
     "model_key",
-    "directional_accuracy",
-    "correct_count",
-    "incorrect_count",
-    "pnl_positive_rate",
-    "total_pnl",
     "sharpe_ratio",
+    "total_pnl",
+    "directional_accuracy",
+    "pnl_positive_rate",
     "max_drawdown",
-    "hit_rate",
+    "drawdown_duration_steps",
+    "strategy_name",
+    "significant_vs_persistence",
     "price_mae",
     "price_rmse",
-    "results_path",
-    "metrics_path",
-    "analytics_path",
+    "price_sharpe_ci_lower",
+    "price_sharpe_ci_upper",
+    "strategy_metrics_path",
+    "strategy_significance_path",
     "training_metrics_path",
+    "training_diagnostics_path",
     "scored_path",
-    "backtest_output_dir",
+    "research_output_dir",
 ]
 
 
@@ -47,16 +50,20 @@ class ModelComparisonResult:
 
 
 def sort_model_comparison(summary_df: pd.DataFrame) -> pd.DataFrame:
-    """Rank models by directional accuracy, then forecast error and pnl quality."""
+    """Rank models by trading performance first, then forecast diagnostics."""
     if summary_df.empty:
         return pd.DataFrame(columns=SUMMARY_COLUMNS)
     ranked = summary_df.copy()
-    ranked["directional_accuracy"] = pd.to_numeric(ranked["directional_accuracy"], errors="coerce")
+    for column in ["sharpe_ratio", "total_pnl", "price_mae", "directional_accuracy"]:
+        if column not in ranked.columns:
+            ranked[column] = pd.NA
+    ranked["sharpe_ratio"] = pd.to_numeric(ranked["sharpe_ratio"], errors="coerce")
+    ranked["total_pnl"] = pd.to_numeric(ranked["total_pnl"], errors="coerce")
     ranked["price_mae"] = pd.to_numeric(ranked["price_mae"], errors="coerce")
-    ranked["pnl_positive_rate"] = pd.to_numeric(ranked["pnl_positive_rate"], errors="coerce")
+    ranked["directional_accuracy"] = pd.to_numeric(ranked["directional_accuracy"], errors="coerce")
     ranked = ranked.sort_values(
-        by=["directional_accuracy", "price_mae", "pnl_positive_rate", "model_key"],
-        ascending=[False, True, False, True],
+        by=["sharpe_ratio", "total_pnl", "directional_accuracy", "price_mae", "model_key"],
+        ascending=[False, False, False, True, True],
         na_position="last",
     ).reset_index(drop=True)
     ranked["rank"] = ranked.index + 1
@@ -100,44 +107,45 @@ def run_model_comparison(
             training_outputs = train_with_model(model_key, features_df, cfg)
             training_metrics = _load_training_metrics(training_outputs.metrics_path)
             model_output_dir = root / model_key
-            backtest_result = run_backtest(
+            strategy_result = run_strategy_comparison(
                 training_outputs.scored_df,
-                BacktestConfig(
-                    output_dir=model_output_dir,
-                    transaction_cost_bps=transaction_cost_bps if transaction_cost_bps is not None else cfg.tcost_bps,
-                    annualization_factor=annualization_factor if annualization_factor is not None else cfg.annualization_factor,
-                    long_threshold=long_threshold,
-                    short_threshold=short_threshold,
-                    notional_eur=notional_eur if notional_eur is not None else cfg.backtest_notional_eur,
-                    accuracy_horizon_steps=accuracy_horizon_steps,
-                    hold_tolerance_pct=hold_tolerance_pct,
-                    enable_new_signal=cfg.enable_new_signal,
-                    signal_volatility_window_hours=cfg.signal_volatility_window_hours,
-                    signal_position_scale_k=cfg.signal_position_scale_k,
-                    enable_volatility_scaling=cfg.enable_volatility_scaling,
-                    enable_execution_delay=cfg.enable_execution_delay,
-                ),
+                cfg,
+                output_dir=model_output_dir,
+                model_key=model_key,
             )
-            accuracy_summary = backtest_result.analytics.get("accuracy_summary", {})
+            upgraded_dir = model_output_dir / "upgraded_strategy"
+            for artifact_name in ["backtest_results.csv", "backtest_metrics.json", "backtest_analytics.json"]:
+                source_path = upgraded_dir / artifact_name
+                if source_path.exists():
+                    shutil.copyfile(source_path, model_output_dir / artifact_name)
+            upgraded_row = strategy_result.strategy_metrics_df.loc[
+                strategy_result.strategy_metrics_df["strategy_name"] == "upgraded_strategy"
+            ].iloc[0]
+            persistence_row = strategy_result.significance_df.loc[
+                (strategy_result.significance_df["strategy_name"] == "upgraded_strategy")
+                & (strategy_result.significance_df["baseline_name"] == "persistence")
+            ].iloc[0]
             rows.append(
                 {
                     "model_key": model_key,
-                    "directional_accuracy": float(backtest_result.metrics.get("directional_accuracy", 0.0)),
-                    "correct_count": int(accuracy_summary.get("correct_count", 0)),
-                    "incorrect_count": int(accuracy_summary.get("incorrect_count", 0)),
-                    "pnl_positive_rate": float(backtest_result.metrics.get("pnl_positive_rate", 0.0)),
-                    "total_pnl": float(backtest_result.metrics.get("total_pnl", 0.0)),
-                    "sharpe_ratio": float(backtest_result.metrics.get("sharpe_ratio", 0.0)),
-                    "max_drawdown": float(backtest_result.metrics.get("max_drawdown", 0.0)),
-                    "hit_rate": float(backtest_result.metrics.get("hit_rate", 0.0)),
+                    "strategy_name": str(upgraded_row.get("strategy_name", "upgraded_strategy")),
+                    "directional_accuracy": float(upgraded_row.get("directional_accuracy", 0.0)),
+                    "pnl_positive_rate": float(upgraded_row.get("pnl_positive_rate", 0.0)),
+                    "total_pnl": float(upgraded_row.get("total_pnl", 0.0)),
+                    "sharpe_ratio": float(upgraded_row.get("sharpe_ratio", 0.0)),
+                    "max_drawdown": float(upgraded_row.get("max_drawdown", 0.0)),
+                    "drawdown_duration_steps": int(upgraded_row.get("drawdown_duration_steps", 0)),
+                    "significant_vs_persistence": bool(persistence_row.get("significant_outperformance", False)),
                     "price_mae": float(training_metrics.get("price", {}).get("mae", float("nan"))),
                     "price_rmse": float(training_metrics.get("price", {}).get("rmse", float("nan"))),
-                    "results_path": backtest_result.results_path,
-                    "metrics_path": backtest_result.metrics_path,
-                    "analytics_path": backtest_result.analytics_path,
+                    "price_sharpe_ci_lower": float(upgraded_row.get("sharpe_ci_lower", 0.0)),
+                    "price_sharpe_ci_upper": float(upgraded_row.get("sharpe_ci_upper", 0.0)),
+                    "strategy_metrics_path": strategy_result.metrics_csv_path,
+                    "strategy_significance_path": strategy_result.significance_csv_path,
                     "training_metrics_path": str(training_outputs.metrics_path),
+                    "training_diagnostics_path": str(getattr(training_outputs, "diagnostics_path", "")),
                     "scored_path": str(training_outputs.scored_path),
-                    "backtest_output_dir": str(model_output_dir),
+                    "research_output_dir": str(model_output_dir),
                 }
             )
         except Exception as exc:
@@ -147,7 +155,7 @@ def run_model_comparison(
     winner_model = str(summary_df.iloc[0]["model_key"]) if not summary_df.empty else None
     metadata = {
         "models_requested": selected_models,
-        "winner_metric": "directional_accuracy",
+        "winner_metric": "sharpe_ratio",
         "winner_model": winner_model,
         "accuracy_horizon_steps": int(accuracy_horizon_steps),
         "hold_tolerance_pct": float(hold_tolerance_pct),

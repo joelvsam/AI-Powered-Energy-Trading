@@ -12,6 +12,7 @@ from xgboost import XGBRegressor
 
 from src.config import AppConfig
 from src.models.base import TrainingOutputs
+from src.models.diagnostics import build_common_error_analysis, write_model_diagnostics, xgb_feature_importance
 from src.models.walk_forward import iter_walk_forward_windows
 
 
@@ -105,11 +106,20 @@ def train_xgb_models(features_df: pd.DataFrame, cfg: AppConfig) -> TrainingOutpu
     renewable_path = cfg.models_dir / "renewable_xgboost.joblib"
     price_path = cfg.models_dir / "price_xgboost.joblib"
     metrics_path = cfg.models_dir / "metrics_xgboost.json"
+    diagnostics_path = cfg.models_dir / "diagnostics_xgboost.json"
     joblib.dump(demand_model, demand_path)
     joblib.dump(renewable_model, renewable_path)
     joblib.dump(price_model, price_path)
     with metrics_path.open("w", encoding="utf-8") as handle:
         json.dump({"demand": demand_metrics, "renewable": renewable_metrics, "price": price_metrics}, handle, indent=2)
+    diagnostics_payload = {
+        "model_key": "xgboost",
+        "price_feature_importance": xgb_feature_importance(price_model, feature_cols),
+        "demand_feature_importance": xgb_feature_importance(demand_model, feature_cols),
+        "renewable_feature_importance": xgb_feature_importance(renewable_model, feature_cols),
+        "error_analysis": build_common_error_analysis(df),
+    }
+    write_model_diagnostics(diagnostics_payload, diagnostics_path)
 
     return TrainingOutputs(
         demand_model_path=str(demand_path),
@@ -118,6 +128,7 @@ def train_xgb_models(features_df: pd.DataFrame, cfg: AppConfig) -> TrainingOutpu
         metrics_path=str(metrics_path),
         scored_df=df,
         model_key="xgboost",
+        diagnostics_path=str(diagnostics_path),
     )
 
 

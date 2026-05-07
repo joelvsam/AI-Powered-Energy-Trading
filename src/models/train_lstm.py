@@ -12,6 +12,7 @@ from sklearn.preprocessing import StandardScaler
 
 from src.config import AppConfig
 from src.models.base import TrainingOutputs
+from src.models.diagnostics import build_common_error_analysis, lstm_feature_ablation, write_model_diagnostics
 from src.models.walk_forward import iter_walk_forward_windows
 
 try:
@@ -163,6 +164,7 @@ def train_lstm_models(features_df: pd.DataFrame, cfg: AppConfig) -> TrainingOutp
     renewable_scaler_path = cfg.models_dir / "renewable_lstm_scaler.joblib"
     price_scaler_path = cfg.models_dir / "price_lstm_scaler.joblib"
     metrics_path = cfg.models_dir / "metrics_lstm.json"
+    diagnostics_path = cfg.models_dir / "diagnostics_lstm.json"
     torch.save(demand_model.state_dict(), demand_path)
     torch.save(renewable_model.state_dict(), renewable_path)
     torch.save(price_model.state_dict(), price_path)
@@ -171,6 +173,14 @@ def train_lstm_models(features_df: pd.DataFrame, cfg: AppConfig) -> TrainingOutp
     joblib.dump(price_scaler, price_scaler_path)
     with metrics_path.open("w", encoding="utf-8") as handle:
         json.dump({"demand": demand_metrics, "renewable": renewable_metrics, "price": price_metrics}, handle, indent=2)
+    diagnostics_payload = {
+        "model_key": "lstm",
+        "price_feature_ablation": lstm_feature_ablation(price_model, price_scaler, X, feature_cols),
+        "demand_feature_ablation": lstm_feature_ablation(demand_model, demand_scaler, X, feature_cols),
+        "renewable_feature_ablation": lstm_feature_ablation(renewable_model, renewable_scaler, X, feature_cols),
+        "error_analysis": build_common_error_analysis(df),
+    }
+    write_model_diagnostics(diagnostics_payload, diagnostics_path)
 
     return TrainingOutputs(
         demand_model_path=str(demand_path),
@@ -179,4 +189,5 @@ def train_lstm_models(features_df: pd.DataFrame, cfg: AppConfig) -> TrainingOutp
         metrics_path=str(metrics_path),
         scored_df=df,
         model_key="lstm",
+        diagnostics_path=str(diagnostics_path),
     )

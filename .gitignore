@@ -8,6 +8,7 @@ data/processed/*.csv
 artifacts/models/*
 artifacts/simulation/*
 artifacts/backtesting/*
+artifacts/research/*
 artifacts/_test_backtesting/
 artifacts/_test_dashboard_review/
 *.joblib
@@ -37,3 +38,4 @@ __pycache__/
 BACKTESTING_BEGINNER_GUIDE.txt
 beginner_guide.txt
 expert_overview.txt
+project_context.yaml

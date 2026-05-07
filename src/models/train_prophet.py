@@ -11,6 +11,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 from src.config import AppConfig
 from src.models.base import TrainingOutputs
+from src.models.diagnostics import build_common_error_analysis, prophet_regressor_effects, write_model_diagnostics
 from src.models.walk_forward import iter_walk_forward_windows
 
 try:
@@ -114,11 +115,20 @@ def train_prophet_models(features_df: pd.DataFrame, cfg: AppConfig) -> TrainingO
     renewable_path = cfg.models_dir / "renewable_prophet.joblib"
     price_path = cfg.models_dir / "price_prophet.joblib"
     metrics_path = cfg.models_dir / "metrics_prophet.json"
+    diagnostics_path = cfg.models_dir / "diagnostics_prophet.json"
     joblib.dump(demand_model, demand_path)
     joblib.dump(renewable_model, renewable_path)
     joblib.dump(price_model, price_path)
     with metrics_path.open("w", encoding="utf-8") as handle:
         json.dump({"demand": demand_metrics, "renewable": renewable_metrics, "price": price_metrics}, handle, indent=2)
+    diagnostics_payload = {
+        "model_key": "prophet",
+        "price_regressor_effects": prophet_regressor_effects(price_model, regressor_cols),
+        "demand_regressor_effects": prophet_regressor_effects(demand_model, regressor_cols),
+        "renewable_regressor_effects": prophet_regressor_effects(renewable_model, regressor_cols),
+        "error_analysis": build_common_error_analysis(df),
+    }
+    write_model_diagnostics(diagnostics_payload, diagnostics_path)
 
     return TrainingOutputs(
         demand_model_path=str(demand_path),
@@ -127,4 +137,5 @@ def train_prophet_models(features_df: pd.DataFrame, cfg: AppConfig) -> TrainingO
         metrics_path=str(metrics_path),
         scored_df=df,
         model_key="prophet",
+        diagnostics_path=str(diagnostics_path),
     )

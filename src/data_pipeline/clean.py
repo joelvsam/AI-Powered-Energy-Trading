@@ -19,11 +19,29 @@ def _interpolate_on_timestamp(out: pd.DataFrame, value_cols: list[str]) -> pd.Da
 def clean_energy_data(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["timestamp_utc"] = pd.to_datetime(out["timestamp_utc"], utc=True, errors="coerce")
-    numeric_cols = ["price_eur_mwh", "demand_kw", "renewable_mw"]
+    numeric_cols = [
+        "price_eur_mwh",
+        "day_ahead_price_eur_mwh",
+        "intraday_price_eur_mwh",
+        "intraday_day_ahead_spread_eur_mwh",
+        "imbalance_price_eur_mwh",
+        "imbalance_price_buy_eur_mwh",
+        "imbalance_price_sell_eur_mwh",
+        "demand_kw",
+        "renewable_mw",
+        "intraday_renewable_forecast_mw",
+    ]
     for col in numeric_cols:
+        if col not in out.columns:
+            out[col] = pd.NA
         out[col] = pd.to_numeric(out[col], errors="coerce")
     out = out.drop_duplicates(subset=["timestamp_utc"]).sort_values("timestamp_utc")
-    return _interpolate_on_timestamp(out, numeric_cols)
+    out = _interpolate_on_timestamp(out, numeric_cols)
+    out["day_ahead_price_eur_mwh"] = out["day_ahead_price_eur_mwh"].fillna(out["price_eur_mwh"])
+    out["intraday_price_eur_mwh"] = out["intraday_price_eur_mwh"].fillna(out["price_eur_mwh"])
+    out["price_eur_mwh"] = out["intraday_price_eur_mwh"].fillna(out["day_ahead_price_eur_mwh"]).fillna(out["price_eur_mwh"])
+    out["intraday_day_ahead_spread_eur_mwh"] = out["intraday_price_eur_mwh"] - out["day_ahead_price_eur_mwh"]
+    return out
 
 
 def clean_weather_data(df: pd.DataFrame) -> pd.DataFrame:

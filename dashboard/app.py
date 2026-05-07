@@ -63,10 +63,17 @@ def _render_pipeline_page() -> None:
     lookback_days = st.selectbox("Training Window (days)", options=[90, 180, 365], index=1)
     model = st.selectbox("Model", options=["xgboost", "lstm", "prophet"], index=0)
     horizon = st.slider("Simulation Horizon", min_value=12, max_value=168, value=24, step=12)
+    skip_model_comparison = st.checkbox("Skip full model comparison", value=False, help="Run only the selected model workflow and skip the cross-model comparison pass.")
 
     result = st.session_state.get("pipeline_result")
     if st.button("Run Pipeline", type="primary"):
-        args = argparse.Namespace(zone=region, lookback_days=lookback_days, simulation_horizon=horizon, model=model)
+        args = argparse.Namespace(
+            zone=region,
+            lookback_days=lookback_days,
+            simulation_horizon=horizon,
+            model=model,
+            skip_model_comparison=skip_model_comparison,
+        )
         with st.spinner("Running pipeline... this may take a while."):
             result = run_workflow(args)
         st.session_state["pipeline_result"] = result
@@ -93,11 +100,10 @@ def _render_pipeline_page() -> None:
         },
     )
     llm_label, llm_type = _mode_label(
-        runtime_modes.get("decision_source", "unknown"),
+        runtime_modes.get("research_source", "unknown"),
         {
-            "huggingface": ("LLM decision active", "primary"),
-            "huggingface_non_json": ("LLM used, non-JSON response", "warning"),
-            "deterministic_fallback": ("Deterministic fallback active", "warning"),
+            "huggingface": ("LLM research analysis active", "primary"),
+            "deterministic_fallback": ("Deterministic research fallback active", "warning"),
         },
     )
 
@@ -113,14 +119,14 @@ def _render_pipeline_page() -> None:
         else:
             st.info("Energy data mode could not be determined.")
     with m2:
-        st.metric("Decision Engine Mode", llm_label)
+        st.metric("Research Agent Mode", llm_label)
         st.caption(f"Model: `{runtime_modes.get('llm_model', 'unknown')}`")
         if llm_type == "primary":
-            st.success("The Hugging Face LLM produced the final decision.")
+            st.success("The Hugging Face LLM produced the research summary.")
         elif llm_type == "warning":
-            st.warning("The pipeline fell back safely because the LLM response was unusable or unavailable.")
+            st.warning("The pipeline fell back safely because the LLM was unavailable.")
         else:
-            st.info("Decision engine mode could not be determined.")
+            st.info("Research agent mode could not be determined.")
 
     metrics_path = Path(result["metrics_path"])
     if metrics_path.exists():
@@ -161,21 +167,17 @@ def _render_pipeline_page() -> None:
     s5.metric("Predicted Imbalance", f"{latest_signal['imbalance_pred']:.2f} MW")
 
     strategy_comparison = result.get("strategy_comparison", {})
-    if strategy_comparison:
+    if strategy_comparison and "summary_df" in strategy_comparison:
         st.subheader("Strategy Comparison")
-        old_metrics = strategy_comparison.get("old", {})
-        new_metrics = strategy_comparison.get("new", {})
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Sharpe Improvement", f"{float(new_metrics.get('sharpe_ratio', 0.0)) - float(old_metrics.get('sharpe_ratio', 0.0)):.3f}")
-        c2.metric("Drawdown Improvement", f"{float(new_metrics.get('max_drawdown', 0.0)) - float(old_metrics.get('max_drawdown', 0.0)):.3f}")
-        c3.metric("Trade Frequency Change", f"{int(new_metrics.get('trade_count', 0)) - int(old_metrics.get('trade_count', 0))}")
+        st.dataframe(strategy_comparison["summary_df"], use_container_width=True)
+        st.dataframe(strategy_comparison["significance_df"], use_container_width=True)
 
     render_history_charts(features_df.tail(300))
     render_prediction_chart(scored_df.tail(300))
     render_backtest_chart(backtest_df.tail(300))
 
-    st.subheader("Decision Report")
-    st.json(result["decision_report"])
+    st.subheader("Research Summary")
+    st.json(result["research_summary"]["summary"])
 
 
 def _render_review_details(review_df: pd.DataFrame, metrics: dict[str, object], analytics: dict[str, object], *, horizon_steps: int, hold_tolerance_decimal: float) -> None:
@@ -364,7 +366,7 @@ def _render_backtesting_review_page() -> None:
 
         winner_model = comparison_metadata.get("winner_model")
         if winner_model:
-            st.success(f"Top model by directional accuracy: {winner_model}")
+            st.success(f"Top model by trading performance: {winner_model}")
         if comparison_metadata.get("energy_source"):
             st.caption(
                 f"Region: {comparison_metadata.get('zone')} | Training window: {comparison_metadata.get('lookback_days')} days | "
@@ -373,16 +375,16 @@ def _render_backtesting_review_page() -> None:
         comparison_columns = [
             "rank",
             "model_key",
-            "directional_accuracy",
-            "correct_count",
-            "incorrect_count",
-            "pnl_positive_rate",
-            "total_pnl",
+            "strategy_name",
             "sharpe_ratio",
+            "total_pnl",
+            "directional_accuracy",
+            "pnl_positive_rate",
             "max_drawdown",
-            "hit_rate",
+            "drawdown_duration_steps",
             "price_mae",
             "price_rmse",
+            "significant_vs_persistence",
         ]
         st.subheader("Model Comparison")
         st.dataframe(
@@ -395,7 +397,8 @@ def _render_backtesting_review_page() -> None:
 
         selected_model = st.selectbox("Inspect model", options=list(comparison_summary_df["model_key"]))
         selected_row = comparison_summary_df.loc[comparison_summary_df["model_key"] == selected_model].iloc[0]
-        review_df, metrics, analytics = load_backtest_artifacts(selected_row["backtest_output_dir"])
+        upgraded_strategy_dir = Path(str(selected_row["research_output_dir"])) / "upgraded_strategy"
+        review_df, metrics, analytics = load_backtest_artifacts(upgraded_strategy_dir)
         training_metrics_path = Path(str(selected_row["training_metrics_path"]))
         if training_metrics_path.exists():
             training_metrics = json.loads(training_metrics_path.read_text(encoding="utf-8"))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 import subprocess
@@ -7,9 +8,11 @@ import sys
 import types
 import unittest
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 
 from src.backtesting.comparison import run_model_comparison, sort_model_comparison
@@ -26,8 +29,10 @@ from src.backtesting.engine import (
     run_backtest,
 )
 from src.config import AppConfig
+from src.features.build_features import build_features
 from src.models.base import scored_predictions_path
 from src.trading.backtest import run_backtest as run_pipeline_backtest
+from scripts.run_all import _adjust_walk_forward_config, run_workflow
 
 
 def build_scored_df() -> pd.DataFrame:
@@ -202,6 +207,94 @@ class BacktestEngineTests(unittest.TestCase):
             self.assertAlmostEqual(pipeline_metrics["max_drawdown"], isolated_metrics["max_drawdown"])
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_build_features_tolerates_missing_optional_entsoe_context(self) -> None:
+        temp_dir = make_workspace_temp_dir()
+        try:
+            cfg = AppConfig(project_root=temp_dir, data_processed_dir=temp_dir / "processed")
+            cfg.data_processed_dir.mkdir(parents=True, exist_ok=True)
+            df = pd.DataFrame(
+                {
+                    "timestamp_utc": pd.date_range("2026-01-01", periods=80, freq="h", tz="UTC"),
+                    "price_eur_mwh": np.linspace(50.0, 60.0, 80),
+                    "demand_kw": np.linspace(10000.0, 11000.0, 80),
+                    "renewable_mw": np.linspace(8.0, 10.0, 80),
+                    "temperature_c": np.linspace(5.0, 8.0, 80),
+                    "wind_speed_mps": np.linspace(4.0, 6.0, 80),
+                    "radiation_wm2": np.linspace(50.0, 150.0, 80),
+                    "humidity_pct": np.linspace(60.0, 70.0, 80),
+                    "day_ahead_price_eur_mwh": np.linspace(49.0, 59.0, 80),
+                    "intraday_price_eur_mwh": np.linspace(50.0, 60.0, 80),
+                    "imbalance_price_eur_mwh": [np.nan] * 80,
+                    "intraday_renewable_forecast_mw": [np.nan] * 80,
+                }
+            )
+
+            features = build_features(df, cfg)
+
+            self.assertFalse(features.empty)
+            self.assertIn("imbalance_price_eur_mwh_available", features.columns)
+            self.assertIn("intraday_renewable_forecast_mw_available", features.columns)
+            self.assertTrue((features["imbalance_price_eur_mwh_available"] == 0.0).all())
+            self.assertNotIn("imbalance_price_buy_eur_mwh", features.columns)
+            self.assertNotIn("imbalance_price_sell_eur_mwh", features.columns)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_adjust_walk_forward_config_shrinks_train_window_when_features_trim_history(self) -> None:
+        cfg = AppConfig(
+            walk_forward_train_window_days=90,
+            walk_forward_test_window_days=7,
+        )
+
+        adjusted = _adjust_walk_forward_config(cfg, feature_rows=2161)
+
+        self.assertEqual(adjusted.walk_forward_train_window_days, 83)
+        self.assertEqual(adjusted.walk_forward_test_window_days, 7)
+
+    def test_adjust_walk_forward_config_still_fails_when_not_enough_for_one_split(self) -> None:
+        cfg = AppConfig(
+            walk_forward_train_window_days=90,
+            walk_forward_test_window_days=7,
+        )
+
+        with self.assertRaises(ValueError):
+            _adjust_walk_forward_config(cfg, feature_rows=(7 * 24 * 2) - 1)
+
+    def test_run_workflow_defaults_skip_model_comparison_when_missing_from_namespace(self) -> None:
+        args = argparse.Namespace(zone="DE_LU", lookback_days=90, simulation_horizon=24, model="xgboost")
+        fake_pipeline = types.SimpleNamespace(merged_df=pd.DataFrame({"timestamp_utc": pd.date_range("2026-01-01", periods=1, freq="h", tz="UTC")}), energy_source="synthetic")
+        fake_train = types.SimpleNamespace(
+            scored_df=pd.DataFrame({"timestamp_utc": pd.date_range("2026-01-01", periods=1, freq="h", tz="UTC")}),
+            metrics_path="metrics.json",
+            diagnostics_path="diag.json",
+            scored_path="scored.csv",
+            model_key="xgboost",
+        )
+        fake_backtest = types.SimpleNamespace(result_df=pd.DataFrame({"timestamp_utc": pd.date_range("2026-01-01", periods=1, freq="h", tz="UTC")}), metrics={})
+        fake_strategy = types.SimpleNamespace(
+            strategy_metrics_df=pd.DataFrame([{"strategy_name": "upgraded_strategy", "sharpe_ratio": 1.0}]),
+            significance_df=pd.DataFrame(),
+        )
+        fake_model_comparison = types.SimpleNamespace(summary_df=pd.DataFrame(), summary_csv_path="summary.csv", summary_json_path="summary.json")
+        fake_research = {"summary": {"source": "deterministic_fallback"}, "json_path": "research.json", "note_path": "research.md"}
+
+        with patch("scripts.run_all.ensure_directories"), patch("scripts.run_all.set_global_seed"), patch(
+            "scripts.run_all.run_data_pipeline", return_value=fake_pipeline
+        ), patch("scripts.run_all.build_features", return_value=pd.DataFrame({"timestamp_utc": pd.date_range("2026-01-01", periods=24 * 14, freq="h", tz="UTC")})), patch(
+            "scripts.run_all.run_anomaly_review", return_value={"report": {}, "path": "anomaly.json"}
+        ), patch("scripts.run_all.train_with_model", return_value=fake_train), patch(
+            "scripts.run_all.run_backtest", return_value=fake_backtest
+        ), patch("scripts.run_all.run_strategy_comparison", return_value=fake_strategy), patch(
+            "scripts.run_all.run_model_comparison", return_value=fake_model_comparison
+        ) as mock_model_comparison, patch("scripts.run_all.run_realtime_simulation", return_value="sim.jsonl"), patch(
+            "scripts.run_all.write_research_note", return_value=fake_research
+        ):
+            result = run_workflow(args)
+
+        self.assertIn("config", result)
+        self.assertFalse(result["config"]["skip_model_comparison"])
+        self.assertTrue(mock_model_comparison.called)
 
     def test_run_all_imports_without_new_backtesting_dependency(self) -> None:
         hf_module = types.ModuleType("huggingface_hub")

@@ -52,14 +52,25 @@ def _synthetic_energy(start: pd.Timestamp, end: pd.Timestamp, seed: int) -> pd.D
         + rng.normal(0, 1.5, len(ts))
     ).clip(min=0.2)
     imbalance = demand_kw / 1000.0 - renewable_mw
-    price = (45 + 2.8 * imbalance + rng.normal(0, 4, len(ts))).clip(min=0.0)
+    day_ahead_price = (42 + 2.2 * imbalance + rng.normal(0, 3, len(ts))).clip(min=0.0)
+    intraday_spread = rng.normal(0, 1.8, len(ts)) + 0.15 * np.roll(imbalance, 1)
+    intraday_price = (day_ahead_price + intraday_spread).clip(min=0.0)
+    imbalance_price = (intraday_price + rng.normal(0, 2.0, len(ts))).clip(min=0.0)
+    renewable_forecast = (renewable_mw + rng.normal(0, 0.8, len(ts))).clip(min=0.0)
 
     return pd.DataFrame(
         {
             "timestamp_utc": ts,
-            "price_eur_mwh": price,
+            "price_eur_mwh": intraday_price,
+            "day_ahead_price_eur_mwh": day_ahead_price,
+            "intraday_price_eur_mwh": intraday_price,
+            "intraday_day_ahead_spread_eur_mwh": intraday_price - day_ahead_price,
+            "imbalance_price_eur_mwh": imbalance_price,
+            "imbalance_price_buy_eur_mwh": imbalance_price + 0.8,
+            "imbalance_price_sell_eur_mwh": (imbalance_price - 0.8).clip(min=0.0),
             "demand_kw": demand_kw,
             "renewable_mw": renewable_mw,
+            "intraday_renewable_forecast_mw": renewable_forecast,
         }
     )
 

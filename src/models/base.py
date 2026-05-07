@@ -19,6 +19,7 @@ class TrainingOutputs:
     scored_df: pd.DataFrame
     model_key: str
     scored_path: str = ""
+    diagnostics_path: str = ""
 
 
 def scored_predictions_path(model_key: str, cfg: AppConfig) -> Path:
