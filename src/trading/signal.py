@@ -26,6 +26,8 @@ class SignalConfig:
     position_limit: float = 1.0
     long_threshold: float = 0.1
     short_threshold: float = -0.1
+    long_price_edge_threshold: float = 0.5
+    short_price_edge_threshold: float = -0.5
 
 
 def decision_from_position(position: pd.Series, tolerance: float = 1e-6) -> pd.Series:
@@ -34,6 +36,20 @@ def decision_from_position(position: pd.Series, tolerance: float = 1e-6) -> pd.S
     return pd.Series(
         np.where(numeric > tolerance, "LONG", np.where(numeric < -tolerance, "SHORT", "HOLD")),
         index=position.index,
+    )
+
+
+def decision_from_price_edge(
+    price_edge: pd.Series,
+    *,
+    long_threshold: float,
+    short_threshold: float,
+) -> pd.Series:
+    """Map forecasted price edge into the user-facing trading recommendation."""
+    numeric = pd.to_numeric(price_edge, errors="coerce").fillna(0.0)
+    return pd.Series(
+        np.where(numeric > long_threshold, "LONG", np.where(numeric < short_threshold, "SHORT", "HOLD")),
+        index=price_edge.index,
     )
 
 
@@ -102,24 +118,41 @@ def compute_signal_frame(df: pd.DataFrame, config: SignalConfig) -> pd.DataFrame
         "trend",
         "mean_revert",
     )
+    out["price_edge_signal"] = out["pred_price_delta"]
+    out["price_edge_decision"] = decision_from_price_edge(
+        out["pred_price_delta"],
+        long_threshold=config.long_price_edge_threshold,
+        short_threshold=config.short_price_edge_threshold,
+    )
+    price_edge_direction = pd.Series(
+        np.where(out["price_edge_decision"] == "LONG", 1.0, np.where(out["price_edge_decision"] == "SHORT", -1.0, 0.0)),
+        index=out.index,
+    )
+    long_excess = (out["pred_price_delta"] - config.long_price_edge_threshold).clip(lower=0.0)
+    short_excess = (config.short_price_edge_threshold - out["pred_price_delta"]).clip(lower=0.0)
+    out["price_edge_strength"] = long_excess + short_excess
 
     if config.enable_new_signal:
-        combined_signal = (
+        ensemble_signal = (
             config.forecast_weight * out["forecast_signal"]
             + config.mean_reversion_weight * out["mean_reversion_signal"]
             + config.fundamental_weight * (out["fundamental_signal"] - 0.25 * out["spread_signal"])
         )
         if config.enable_regime_switching:
-            combined_signal = np.where(
+            ensemble_signal = np.where(
                 out["market_regime"] == "trend",
                 config.forecast_weight * out["forecast_signal"] + config.fundamental_weight * out["fundamental_signal"],
                 config.mean_reversion_weight * out["mean_reversion_signal"] + config.fundamental_weight * out["fundamental_signal"],
             )
-            combined_signal = pd.Series(combined_signal, index=out.index)
-        out["combined_signal"] = pd.to_numeric(combined_signal, errors="coerce").fillna(0.0)
+            ensemble_signal = pd.Series(ensemble_signal, index=out.index)
+        out["ensemble_signal"] = pd.to_numeric(ensemble_signal, errors="coerce").fillna(0.0)
+        out["combined_signal"] = price_edge_direction * out["price_edge_strength"]
         out["signal_z_score"] = out["combined_signal"]
-        out["signal_strength"] = out["combined_signal"]
-        raw_position = np.tanh(out["combined_signal"] / max(config.position_scale_k, 1e-6))
+        out["signal_strength"] = out["price_edge_strength"]
+        raw_position = price_edge_direction * np.tanh(out["price_edge_strength"] / max(config.position_scale_k, 1e-6))
+        aligned_fundamental = price_edge_direction * out["fundamental_signal"]
+        size_multiplier = 1.0 + 0.25 * np.tanh(aligned_fundamental.clip(lower=0.0))
+        raw_position = raw_position * size_multiplier
         if config.enable_volatility_scaling:
             raw_position = raw_position / (1.0 + rolling_volatility)
         high_vol_mask = out["vol_regime"] == "high_vol"
@@ -131,14 +164,15 @@ def compute_signal_frame(df: pd.DataFrame, config: SignalConfig) -> pd.DataFrame
         )
         out["target_position"] = out["target_position_capped"]
     else:
-        raw_signal = 0.06 * out["imbalance_pred"] + 0.4 * out["pred_price_delta"]
+        raw_signal = out["pred_price_delta"]
+        out["ensemble_signal"] = 0.06 * out["imbalance_pred"] + 0.4 * out["pred_price_delta"]
         out["forecast_signal"] = out["pred_price_delta"]
         out["mean_reversion_signal"] = 0.0
         out["fundamental_signal"] = out["imbalance_pred"] / max(config.imbalance_scale, 1e-6)
         out["combined_signal"] = raw_signal
         out["signal_z_score"] = 0.0
-        out["signal_strength"] = raw_signal
-        out["target_position_raw"] = np.tanh(raw_signal / 10.0)
+        out["signal_strength"] = out["price_edge_strength"]
+        out["target_position_raw"] = price_edge_direction * np.tanh(out["price_edge_strength"] / max(config.position_scale_k, 1e-6))
         out["target_position_capped"] = pd.to_numeric(out["target_position_raw"], errors="coerce").clip(
             -abs(config.position_limit), abs(config.position_limit)
         )
@@ -147,5 +181,6 @@ def compute_signal_frame(df: pd.DataFrame, config: SignalConfig) -> pd.DataFrame
         out["market_regime"] = "trend"
 
     out["target_position"] = pd.to_numeric(out["target_position"], errors="coerce").clip(-1.0, 1.0).fillna(0.0)
-    out["target_decision"] = decision_from_position(out["target_position"])
+    out["target_decision"] = out["price_edge_decision"]
+    out["recommended_decision"] = out["target_decision"]
     return out

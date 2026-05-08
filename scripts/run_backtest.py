@@ -32,6 +32,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable-new-signal", choices=["true", "false"], default="true", help="Use the volatility-normalized continuous signal.")
     parser.add_argument("--signal-volatility-window-hours", type=int, default=24, help="Rolling volatility window used by the continuous signal.")
     parser.add_argument("--signal-position-scale-k", type=float, default=2.0, help="Scale factor that maps signal z-scores into positions.")
+    parser.add_argument("--long-price-edge-threshold", type=float, default=0.5, help="Minimum predicted EUR/MWh upside required for a LONG recommendation.")
+    parser.add_argument("--short-price-edge-threshold", type=float, default=-0.5, help="Maximum predicted EUR/MWh downside required for a SHORT recommendation.")
     parser.add_argument("--disable-volatility-scaling", action="store_true", help="Turn off exposure reduction in high-volatility regimes.")
     parser.add_argument("--disable-execution-delay", action="store_true", help="Execute signals immediately instead of at t+1.")
     return parser.parse_args()
@@ -54,6 +56,8 @@ def main() -> None:
             enable_new_signal=args.enable_new_signal == "true",
             signal_volatility_window_hours=args.signal_volatility_window_hours,
             signal_position_scale_k=args.signal_position_scale_k,
+            long_price_edge_threshold=args.long_price_edge_threshold,
+            short_price_edge_threshold=args.short_price_edge_threshold,
             enable_volatility_scaling=not args.disable_volatility_scaling,
             enable_execution_delay=not args.disable_execution_delay,
         ),

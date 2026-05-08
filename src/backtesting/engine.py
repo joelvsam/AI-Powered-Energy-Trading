@@ -40,6 +40,8 @@ class BacktestConfig:
     signal_forecast_weight: float = 0.45
     signal_mean_reversion_weight: float = 0.30
     signal_fundamental_weight: float = 0.25
+    long_price_edge_threshold: float = 0.5
+    short_price_edge_threshold: float = -0.5
     high_vol_regime_quantile: float = 0.7
     position_limit: float = 1.0
     max_position_change: float = 0.35
@@ -243,6 +245,8 @@ def _build_signal_config(config: BacktestConfig) -> SignalConfig:
         forecast_weight=config.signal_forecast_weight,
         mean_reversion_weight=config.signal_mean_reversion_weight,
         fundamental_weight=config.signal_fundamental_weight,
+        long_price_edge_threshold=config.long_price_edge_threshold,
+        short_price_edge_threshold=config.short_price_edge_threshold,
         high_vol_regime_quantile=config.high_vol_regime_quantile,
         position_limit=config.position_limit,
         long_threshold=config.long_threshold,
@@ -338,12 +342,14 @@ def generate_backtest_outputs(scored_df: pd.DataFrame, config: BacktestConfig) -
             "combined_signal",
             "signal_z_score",
             "signal_strength",
+            "ensemble_signal",
             "target_position_raw",
             "target_position_capped",
             "target_position",
         ]:
             df[column] = 0.0
         df["target_decision"] = "HOLD"
+        df["recommended_decision"] = "HOLD"
     reference_price_eur_mwh = _reference_price_scale(df["price_eur_mwh"])
     exposure_mwh = config.notional_eur / reference_price_eur_mwh
     transaction_cost_rate = config.transaction_cost_bps / 10000.0
@@ -398,6 +404,7 @@ def generate_backtest_outputs(scored_df: pd.DataFrame, config: BacktestConfig) -
         df["decision"] = decision_from_position(df["position"])
     else:
         df["decision"] = _threshold_decision_series(df["position"], config.long_threshold, config.short_threshold)
+    df["recommended_decision"] = df.get("recommended_decision", df["target_decision"])
 
     strategy_return, realized_pnl_eur, equity_eur = _simulate_equity_curve(df["net_pnl_eur"], config.notional_eur)
     initial_equity = max(float(config.notional_eur), 1.0)
@@ -468,6 +475,8 @@ def generate_backtest_outputs(scored_df: pd.DataFrame, config: BacktestConfig) -
         "signal_equilibrium_window_hours": int(config.signal_equilibrium_window_hours),
         "signal_position_scale_k": float(config.signal_position_scale_k),
         "signal_imbalance_scale": float(config.signal_imbalance_scale),
+        "long_price_edge_threshold": float(config.long_price_edge_threshold),
+        "short_price_edge_threshold": float(config.short_price_edge_threshold),
         "enable_volatility_scaling": bool(config.enable_volatility_scaling),
         "enable_regime_switching": bool(config.enable_regime_switching),
         "position_limit": float(config.position_limit),

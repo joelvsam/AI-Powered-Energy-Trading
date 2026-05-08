@@ -154,9 +154,10 @@ def _render_pipeline_page() -> None:
     backtest_df: pd.DataFrame = result["backtest_df"]
 
     latest_signal = backtest_df.sort_values("timestamp_utc").iloc[-1]
+    recommended_decision = latest_signal.get("recommended_decision", latest_signal["decision"])
     st.subheader("Latest Trading Signal")
     s1, s2, s3, s4, s5 = st.columns(5)
-    s1.metric("Recommended Action", str(latest_signal["decision"]))
+    s1.metric("Recommended Action", str(recommended_decision))
     s2.metric("Predicted Price", f"{latest_signal['pred_price_eur_mwh']:.2f} EUR/MWh")
     s3.metric(
         "Current Price",

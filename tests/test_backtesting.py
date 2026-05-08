@@ -147,12 +147,57 @@ class BacktestEngineTests(unittest.TestCase):
             self.assertIn("future_price_change_eur_mwh", result.result_df.columns)
             self.assertIn("directional_correct", result.result_df.columns)
             self.assertIn("pnl_positive", result.result_df.columns)
+            self.assertIn("recommended_decision", result.result_df.columns)
+            self.assertIn("target_position", result.result_df.columns)
+            self.assertIn("position", result.result_df.columns)
+            self.assertIn("decision", result.result_df.columns)
             self.assertIn("directional_accuracy", result.metrics)
             self.assertIn("pnl_positive_rate", result.metrics)
             self.assertIn("accuracy_summary", result.analytics)
             self.assertEqual(simulation_metrics.exists(), original_simulation_exists)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_price_led_recommendation_does_not_go_long_on_bearish_price_edge(self) -> None:
+        df = build_scored_df()
+        df["price_eur_mwh"] = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0]
+        df["pred_price_eur_mwh"] = df["price_eur_mwh"] - 1.0
+        df["pred_demand_kw"] = 50_000_000.0
+        df["pred_renewable_mw"] = 1.0
+
+        result_df, _, _ = generate_backtest_outputs(
+            df,
+            BacktestConfig(
+                output_dir=Path("artifacts/backtesting"),
+                enable_execution_delay=False,
+                long_price_edge_threshold=0.5,
+                short_price_edge_threshold=-0.5,
+            ),
+        )
+
+        self.assertTrue((result_df["recommended_decision"] == "SHORT").all())
+        self.assertTrue((result_df["target_position"] < 0.0).all())
+        self.assertFalse((result_df["recommended_decision"] == "LONG").any())
+
+    def test_price_led_recommendation_holds_inside_price_edge_band(self) -> None:
+        df = build_scored_df()
+        df["price_eur_mwh"] = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0]
+        df["pred_price_eur_mwh"] = df["price_eur_mwh"] + 0.25
+        df["pred_demand_kw"] = 50_000_000.0
+        df["pred_renewable_mw"] = 1.0
+
+        result_df, _, _ = generate_backtest_outputs(
+            df,
+            BacktestConfig(
+                output_dir=Path("artifacts/backtesting"),
+                enable_execution_delay=False,
+                long_price_edge_threshold=0.5,
+                short_price_edge_threshold=-0.5,
+            ),
+        )
+
+        self.assertTrue((result_df["recommended_decision"] == "HOLD").all())
+        self.assertTrue((result_df["target_position"] == 0.0).all())
 
     def test_run_backtest_handles_zero_prices_without_nan_metrics(self) -> None:
         df = build_scored_df()

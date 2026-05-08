@@ -54,6 +54,8 @@ class AppConfig:
     signal_forecast_weight: float = float(os.getenv("SIGNAL_FORECAST_WEIGHT", "0.45"))
     signal_mean_reversion_weight: float = float(os.getenv("SIGNAL_MEAN_REVERSION_WEIGHT", "0.30"))
     signal_fundamental_weight: float = float(os.getenv("SIGNAL_FUNDAMENTAL_WEIGHT", "0.25"))
+    long_price_edge_threshold: float = float(os.getenv("LONG_PRICE_EDGE_THRESHOLD", "0.5"))
+    short_price_edge_threshold: float = float(os.getenv("SHORT_PRICE_EDGE_THRESHOLD", "-0.5"))
     enable_regime_switching: bool = os.getenv("ENABLE_REGIME_SWITCHING", "true").strip().lower() in {"1", "true", "yes", "on"}
     high_vol_regime_quantile: float = float(os.getenv("HIGH_VOL_REGIME_QUANTILE", "0.7"))
     position_limit: float = float(os.getenv("POSITION_LIMIT", "1.0"))

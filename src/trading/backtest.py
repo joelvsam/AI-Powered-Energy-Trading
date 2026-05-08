@@ -36,6 +36,8 @@ def run_backtest(scored_df: pd.DataFrame, cfg: AppConfig) -> BacktestOutputs:
         signal_forecast_weight=cfg.signal_forecast_weight,
         signal_mean_reversion_weight=cfg.signal_mean_reversion_weight,
         signal_fundamental_weight=cfg.signal_fundamental_weight,
+        long_price_edge_threshold=cfg.long_price_edge_threshold,
+        short_price_edge_threshold=cfg.short_price_edge_threshold,
         high_vol_regime_quantile=cfg.high_vol_regime_quantile,
         position_limit=cfg.position_limit,
         max_position_change=cfg.max_position_change,
