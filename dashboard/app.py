@@ -42,6 +42,17 @@ def _mode_label(value: str, mapping: dict[str, tuple[str, str]]) -> tuple[str, s
     return mapping.get(normalized, (value or "Unknown", "secondary"))
 
 
+def _energy_mode_from_provenance(summary: dict[str, object]) -> str:
+    synthetic_rows = int(summary.get("synthetic_rows", 0))
+    partial_rows = int(summary.get("partially_synthetic_rows", 0))
+    real_rows = int(summary.get("real_rows", 0))
+    if synthetic_rows > 0 and real_rows == 0 and partial_rows == 0:
+        return "synthetic"
+    if synthetic_rows > 0 or partial_rows > 0:
+        return "entsoe_partial_synthetic"
+    return "entsoe"
+
+
 def _render_environment_diagnostics() -> None:
     with st.expander("Environment Diagnostics"):
         st.write(
@@ -64,6 +75,8 @@ def _render_pipeline_page() -> None:
     model = st.selectbox("Model", options=["xgboost", "lstm", "prophet"], index=0)
     horizon = st.slider("Simulation Horizon", min_value=12, max_value=168, value=24, step=12)
     skip_model_comparison = st.checkbox("Skip full model comparison", value=False, help="Run only the selected model workflow and skip the cross-model comparison pass.")
+    force_refresh = st.checkbox("Force refresh raw-data window", value=False, help="Refetch the selected history window even if cache rows already exist.")
+    rebuild_cache = st.checkbox("Rebuild cache for selected run", value=False, help="Ignore the existing raw-data cache for this run and rebuild it from fetched data plus explicit gap filling.")
 
     result = st.session_state.get("pipeline_result")
     if st.button("Run Pipeline", type="primary"):
@@ -73,6 +86,8 @@ def _render_pipeline_page() -> None:
             simulation_horizon=horizon,
             model=model,
             skip_model_comparison=skip_model_comparison,
+            force_refresh=force_refresh,
+            rebuild_cache=rebuild_cache,
         )
         with st.spinner("Running pipeline... this may take a while."):
             result = run_workflow(args)
@@ -91,11 +106,16 @@ def _render_pipeline_page() -> None:
         }
     )
 
-    runtime_modes = result.get("runtime_modes", {})
+    runtime_modes = dict(result.get("runtime_modes", {}))
+    provenance = result.get("data_provenance", {})
+    if provenance:
+        runtime_modes["energy_source"] = _energy_mode_from_provenance(provenance)
+        runtime_modes["research_grade"] = bool(provenance.get("research_grade", False))
     energy_label, energy_type = _mode_label(
         runtime_modes.get("energy_source", "unknown"),
         {
             "entsoe": ("ENTSO-E live data", "primary"),
+            "entsoe_partial_synthetic": ("ENTSO-E with synthetic gap fill", "warning"),
             "synthetic": ("Synthetic data fallback", "warning"),
         },
     )
@@ -115,7 +135,10 @@ def _render_pipeline_page() -> None:
         if energy_type == "primary":
             st.success("ENTSO-E API data was used for this run.")
         elif energy_type == "warning":
-            st.warning("ENTSO-E was unavailable, so the pipeline switched to synthetic data.")
+            if runtime_modes.get("energy_source") == "entsoe_partial_synthetic":
+                st.warning("Cached and fetched ENTSO-E data were used, with unresolved gaps filled synthetically.")
+            else:
+                st.warning("ENTSO-E was unavailable, so the pipeline used fully synthetic market data.")
         else:
             st.info("Energy data mode could not be determined.")
     with m2:
@@ -127,6 +150,39 @@ def _render_pipeline_page() -> None:
             st.warning("The pipeline fell back safely because the LLM was unavailable.")
         else:
             st.info("Research agent mode could not be determined.")
+
+    cache_summary = result.get("cache_summary", {})
+    if provenance or cache_summary:
+        st.subheader("Cache and Provenance")
+        p1, p2, p3, p4 = st.columns(4)
+        total_rows = int(provenance.get("row_count", 0))
+        real_rows = int(provenance.get("real_rows", 0))
+        partial_rows = int(provenance.get("partially_synthetic_rows", 0))
+        synthetic_rows = int(provenance.get("synthetic_rows", 0))
+        p1.metric("Real Coverage", f"{float(provenance.get('real_coverage_ratio', 0.0)):.2%}")
+        p2.metric("Partial Synthetic", f"{float(provenance.get('partial_synthetic_coverage_ratio', 0.0)):.2%}")
+        p3.metric("Synthetic Coverage", f"{float(provenance.get('synthetic_coverage_ratio', 0.0)):.2%}")
+        p4.metric("Research Grade", "Yes" if runtime_modes.get("research_grade") else "No")
+        st.caption(
+            f"Energy provenance rows: real={real_rows}, partial={partial_rows}, synthetic={synthetic_rows}, total={total_rows}"
+        )
+
+        energy_cache = cache_summary.get("energy", {})
+        weather_cache = cache_summary.get("weather", {})
+        st.caption(
+            "Energy cache: "
+            f"{energy_cache.get('cache_status', 'unknown')} | "
+            f"used={energy_cache.get('cache_used', False)} | "
+            f"fetched_ranges={energy_cache.get('fetched_range_count', 0)} | "
+            f"freshness={energy_cache.get('cache_freshness_utc', 'n/a')}"
+        )
+        st.caption(
+            "Weather cache: "
+            f"{weather_cache.get('cache_status', 'unknown')} | "
+            f"used={weather_cache.get('cache_used', False)} | "
+            f"fetched_ranges={weather_cache.get('fetched_range_count', 0)} | "
+            f"freshness={weather_cache.get('cache_freshness_utc', 'n/a')}"
+        )
 
     metrics_path = Path(result["metrics_path"])
     if metrics_path.exists():
@@ -170,8 +226,8 @@ def _render_pipeline_page() -> None:
     strategy_comparison = result.get("strategy_comparison", {})
     if strategy_comparison and "summary_df" in strategy_comparison:
         st.subheader("Strategy Comparison")
-        st.dataframe(strategy_comparison["summary_df"], use_container_width=True)
-        st.dataframe(strategy_comparison["significance_df"], use_container_width=True)
+        st.dataframe(strategy_comparison["summary_df"], width="stretch")
+        st.dataframe(strategy_comparison["significance_df"], width="stretch")
 
     render_history_charts(features_df.tail(300))
     render_prediction_chart(scored_df.tail(300))
@@ -328,6 +384,8 @@ def _render_backtesting_review_page() -> None:
             annualization_factor = st.number_input("Annualization factor", min_value=1, value=24, step=1, key="comparison_annualization")
         with c3:
             notional_eur = st.number_input("Notional EUR", min_value=1000.0, value=10000.0, step=1000.0, key="comparison_notional")
+        comparison_force_refresh = st.checkbox("Force refresh shared raw-data window", value=False, key="comparison_force_refresh")
+        comparison_rebuild_cache = st.checkbox("Rebuild shared raw-data cache", value=False, key="comparison_rebuild_cache")
         comparison_summary_df: pd.DataFrame | None = None
         comparison_metadata: dict[str, object] = {}
 
@@ -344,6 +402,8 @@ def _render_backtesting_review_page() -> None:
                         notional_eur=float(notional_eur),
                         accuracy_horizon_steps=horizon_steps,
                         hold_tolerance_pct=hold_tolerance_decimal,
+                        force_refresh=comparison_force_refresh,
+                        rebuild_cache=comparison_rebuild_cache,
                     )
                     st.session_state["comparison_payload"] = (comparison_summary_df, comparison_metadata)
                     st.success("Model comparison completed and saved.")
@@ -390,7 +450,7 @@ def _render_backtesting_review_page() -> None:
         st.subheader("Model Comparison")
         st.dataframe(
             comparison_summary_df[[column for column in comparison_columns if column in comparison_summary_df.columns]],
-            use_container_width=True,
+            width="stretch",
         )
         failure_rows = comparison_metadata.get("failures", [])
         if failure_rows:

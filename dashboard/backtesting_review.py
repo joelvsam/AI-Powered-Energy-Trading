@@ -120,6 +120,8 @@ def run_model_comparison_workflow(
     signal_position_scale_k: float = 2.0,
     enable_volatility_scaling: bool = True,
     enable_execution_delay: bool = True,
+    force_refresh: bool = False,
+    rebuild_cache: bool = False,
 ) -> tuple[pd.DataFrame, dict]:
     """Run the shared data pipeline once, then compare xgboost, lstm, and prophet."""
     cfg = AppConfig(
@@ -134,7 +136,13 @@ def run_model_comparison_workflow(
     )
     ensure_directories(cfg)
     set_global_seed(cfg.random_seed)
-    pipeline_out = run_data_pipeline(cfg=cfg, zone=zone, lookback_days=lookback_days)
+    pipeline_out = run_data_pipeline(
+        cfg=cfg,
+        zone=zone,
+        lookback_days=lookback_days,
+        force_refresh=force_refresh,
+        rebuild_cache=rebuild_cache,
+    )
     features_df = build_features(pipeline_out.merged_df, cfg)
     result = run_model_comparison(
         features_df,
@@ -152,6 +160,8 @@ def run_model_comparison_workflow(
     metadata["zone"] = zone or cfg.default_zone
     metadata["lookback_days"] = lookback_days or cfg.lookback_days
     metadata["energy_source"] = pipeline_out.energy_source
+    metadata["provenance_summary"] = pipeline_out.provenance_summary
+    metadata["cache_summary"] = pipeline_out.cache_summary
     return result.summary_df, metadata
 
 

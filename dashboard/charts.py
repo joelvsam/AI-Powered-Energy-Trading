@@ -62,4 +62,4 @@ def render_decision_review_table(review_df: pd.DataFrame) -> None:
         "pnl_positive",
     ]
     present_columns = [column for column in columns if column in review_df.columns]
-    st.dataframe(review_df[present_columns], use_container_width=True)
+    st.dataframe(review_df[present_columns], width="stretch")

@@ -11,7 +11,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from xgboost import XGBRegressor
 
 from src.config import AppConfig
-from src.models.base import TrainingOutputs
+from src.models.base import TrainingOutputs, model_feature_columns
 from src.models.diagnostics import build_common_error_analysis, write_model_diagnostics, xgb_feature_importance
 from src.models.walk_forward import iter_walk_forward_windows
 
@@ -67,8 +67,7 @@ def _fit_target(
 
 def train_xgb_models(features_df: pd.DataFrame, cfg: AppConfig) -> TrainingOutputs:
     df = features_df.copy().sort_values("timestamp_utc").reset_index(drop=True)
-    target_cols = {"timestamp_utc", "demand_kw", "renewable_mw", "price_eur_mwh"}
-    feature_cols = [c for c in df.columns if c not in target_cols]
+    feature_cols = model_feature_columns(df)
     X = df[feature_cols]
     timestamps = df["timestamp_utc"]
 

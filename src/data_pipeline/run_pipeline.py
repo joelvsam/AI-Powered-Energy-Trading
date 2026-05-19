@@ -37,10 +37,25 @@ def _log_frame_diagnostics(df: pd.DataFrame, label: str) -> None:
 class DataPipelineOutputs:
     merged_df: pd.DataFrame
     energy_source: str
+    provenance_summary: dict[str, object]
+    cache_summary: dict[str, object]
 
 
-def run_data_pipeline(cfg: AppConfig, zone: str | None = None, lookback_days: int | None = None) -> DataPipelineOutputs:
-    outputs = ingest_data(cfg=cfg, zone=zone, lookback_days=lookback_days)
+def run_data_pipeline(
+    cfg: AppConfig,
+    zone: str | None = None,
+    lookback_days: int | None = None,
+    *,
+    force_refresh: bool = False,
+    rebuild_cache: bool = False,
+) -> DataPipelineOutputs:
+    outputs = ingest_data(
+        cfg=cfg,
+        zone=zone,
+        lookback_days=lookback_days,
+        force_refresh=force_refresh,
+        rebuild_cache=rebuild_cache,
+    )
     LOGGER.info("Energy source selected: %s", outputs.energy_source)
     _log_frame_diagnostics(outputs.energy_df, "ingest.energy_raw")
     _log_frame_diagnostics(outputs.weather_df, "ingest.weather_raw")
@@ -56,4 +71,12 @@ def run_data_pipeline(cfg: AppConfig, zone: str | None = None, lookback_days: in
             "This usually means no overlapping timestamps or upstream NaNs were dropped. "
             "Inspect data/raw/*.csv and adjust zone/lookback or data-source availability."
         )
-    return DataPipelineOutputs(merged_df=merged, energy_source=outputs.energy_source)
+    return DataPipelineOutputs(
+        merged_df=merged,
+        energy_source=outputs.energy_source,
+        provenance_summary=outputs.provenance_summary,
+        cache_summary={
+            "energy": outputs.energy_cache_diagnostics,
+            "weather": outputs.weather_cache_diagnostics,
+        },
+    )

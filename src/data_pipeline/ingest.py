@@ -12,6 +12,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from src.config import AppConfig
+from src.data_pipeline.cache import resolve_dataset_with_cache, summarize_provenance
 from src.data_sources.entsoe_client import fetch_entsoe_energy_data
 
 LOGGER = logging.getLogger(__name__)
@@ -22,18 +23,21 @@ class IngestionOutputs:
     energy_df: pd.DataFrame
     weather_df: pd.DataFrame
     energy_source: str
+    energy_cache_diagnostics: dict[str, object]
+    weather_cache_diagnostics: dict[str, object]
+    provenance_summary: dict[str, object]
 
 
 def _date_range(cfg: AppConfig, lookback_days: int | None = None) -> tuple[pd.Timestamp, pd.Timestamp]:
     days = lookback_days or cfg.lookback_days
-    end = pd.Timestamp.utcnow().floor("h").tz_convert("UTC")
+    end = pd.Timestamp.now("UTC").floor("h")
     start = end - pd.Timedelta(days=days)
     return start, end
 
 
-def _synthetic_energy(start: pd.Timestamp, end: pd.Timestamp, seed: int) -> pd.DataFrame:
+def _synthetic_energy_for_index(index: pd.DatetimeIndex, seed: int) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
-    ts = pd.date_range(start=start, end=end, freq="h", tz="UTC")
+    ts = pd.DatetimeIndex(index)
     hour = ts.hour.values
     dow = ts.dayofweek.values
     doy = ts.dayofyear.values
@@ -75,6 +79,27 @@ def _synthetic_energy(start: pd.Timestamp, end: pd.Timestamp, seed: int) -> pd.D
     )
 
 
+def _synthetic_weather_for_index(index: pd.DatetimeIndex, seed: int) -> pd.DataFrame:
+    rng = np.random.default_rng(seed + 17)
+    ts = pd.DatetimeIndex(index)
+    hour = ts.hour.values
+    doy = ts.dayofyear.values
+    temperature_c = 11 + 9 * np.sin(2 * np.pi * (doy - 30) / 365.0) + 5 * np.sin(2 * np.pi * hour / 24.0) + rng.normal(0, 1.2, len(ts))
+    wind_speed_mps = np.clip(5.5 + 2.0 * np.cos(2 * np.pi * doy / 365.0) + rng.normal(0, 0.6, len(ts)), 0.0, None)
+    daylight = np.clip(np.sin(2 * np.pi * (hour - 6) / 24.0), 0.0, None)
+    radiation_wm2 = np.clip(450 * daylight * (0.55 + 0.45 * np.sin(2 * np.pi * (doy - 80) / 365.0)), 0.0, None)
+    humidity_pct = np.clip(68 - 0.7 * temperature_c + rng.normal(0, 3.0, len(ts)), 20.0, 100.0)
+    return pd.DataFrame(
+        {
+            "timestamp_utc": ts,
+            "temperature_c": temperature_c,
+            "wind_speed_mps": wind_speed_mps,
+            "radiation_wm2": radiation_wm2,
+            "humidity_pct": humidity_pct,
+        }
+    )
+
+
 def _session() -> requests.Session:
     session = requests.Session()
     session.trust_env = False
@@ -111,29 +136,78 @@ def fetch_openmeteo_weather(start: pd.Timestamp, end: pd.Timestamp, cfg: AppConf
     return df
 
 
-def ingest_data(cfg: AppConfig, zone: str | None = None, lookback_days: int | None = None) -> IngestionOutputs:
-    """Ingest energy data from ENTSO-E with synthetic fallback + weather."""
-    start, end = _date_range(cfg, lookback_days)
-    energy_source = "entsoe"
-    selected_zone = zone or cfg.default_zone
+def _energy_mode_from_summary(summary: dict[str, object]) -> str:
+    synthetic_rows = int(summary.get("synthetic_rows", 0))
+    partial_rows = int(summary.get("partially_synthetic_rows", 0))
+    real_rows = int(summary.get("real_rows", 0))
+    if synthetic_rows > 0 and real_rows == 0 and partial_rows == 0:
+        return "synthetic"
+    if synthetic_rows > 0 or partial_rows > 0:
+        return "entsoe_partial_synthetic"
+    return "entsoe"
 
-    try:
+
+def ingest_data(
+    cfg: AppConfig,
+    zone: str | None = None,
+    lookback_days: int | None = None,
+    *,
+    force_refresh: bool = False,
+    rebuild_cache: bool = False,
+) -> IngestionOutputs:
+    """Ingest energy and weather data through the incremental raw-data cache."""
+    start, end = _date_range(cfg, lookback_days)
+    selected_zone = zone or cfg.default_zone
+    should_rebuild = rebuild_cache or cfg.cache_rebuild_default
+
+    def _energy_fetcher(range_start: pd.Timestamp, range_end: pd.Timestamp) -> pd.DataFrame:
         if not cfg.entsoe_api_key:
-            raise RuntimeError("ENTSOE_API_KEY missing, switching to synthetic mode.")
-        energy_df = fetch_entsoe_energy_data(
+            raise RuntimeError("ENTSOE_API_KEY missing.")
+        return fetch_entsoe_energy_data(
             api_key=cfg.entsoe_api_key,
             zone=selected_zone,
-            start=start,
-            end=end,
+            start=range_start,
+            end=range_end,
             timeout_s=cfg.entsoe_timeout_s,
             chunk_days=cfg.entsoe_chunk_days,
         )
-    except Exception as exc:
-        LOGGER.warning("ENTSO-E ingestion failed: %s", exc)
-        energy_df = _synthetic_energy(start=start, end=end, seed=cfg.random_seed)
-        energy_source = "synthetic"
 
-    weather_df = fetch_openmeteo_weather(start=start, end=end, cfg=cfg)
+    def _weather_fetcher(range_start: pd.Timestamp, range_end: pd.Timestamp) -> pd.DataFrame:
+        return fetch_openmeteo_weather(start=range_start, end=range_end, cfg=cfg)
+
+    energy_df, energy_cache_diag = resolve_dataset_with_cache(
+        cfg=cfg,
+        dataset_name="entsoe",
+        zone=selected_zone,
+        start=start,
+        end=end,
+        fetcher=_energy_fetcher,
+        synthetic_builder=lambda idx: _synthetic_energy_for_index(idx, seed=cfg.random_seed),
+        source_label="entsoe",
+        rebuild_cache=should_rebuild,
+        force_refresh=force_refresh,
+    )
+    weather_df, weather_cache_diag = resolve_dataset_with_cache(
+        cfg=cfg,
+        dataset_name="weather",
+        zone=selected_zone,
+        start=start,
+        end=end,
+        fetcher=_weather_fetcher,
+        synthetic_builder=lambda idx: _synthetic_weather_for_index(idx, seed=cfg.random_seed),
+        source_label="openmeteo",
+        rebuild_cache=should_rebuild,
+        force_refresh=force_refresh,
+    )
+    provenance_summary = summarize_provenance(energy_df)
+    energy_source = _energy_mode_from_summary(provenance_summary)
     energy_df.to_csv(cfg.data_raw_dir / "energy_raw.csv", index=False)
     weather_df.to_csv(cfg.data_raw_dir / "weather_raw.csv", index=False)
-    return IngestionOutputs(energy_df=energy_df, weather_df=weather_df, energy_source=energy_source)
+    return IngestionOutputs(
+        energy_df=energy_df,
+        weather_df=weather_df,
+        energy_source=energy_source,
+        energy_cache_diagnostics=energy_cache_diag.to_dict(),
+        weather_cache_diagnostics=weather_cache_diag.to_dict(),
+        provenance_summary=provenance_summary,
+    )

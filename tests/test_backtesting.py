@@ -286,6 +286,44 @@ class BacktestEngineTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_build_features_bulk_interaction_columns_match_expected_values(self) -> None:
+        temp_dir = make_workspace_temp_dir()
+        try:
+            cfg = AppConfig(project_root=temp_dir, data_processed_dir=temp_dir / "processed")
+            cfg.data_processed_dir.mkdir(parents=True, exist_ok=True)
+            df = pd.DataFrame(
+                {
+                    "timestamp_utc": pd.date_range("2026-01-01", periods=80, freq="h", tz="UTC"),
+                    "price_eur_mwh": np.linspace(50.0, 60.0, 80),
+                    "demand_kw": np.linspace(10000.0, 11000.0, 80),
+                    "renewable_mw": np.linspace(8.0, 10.0, 80),
+                    "temperature_c": np.linspace(5.0, 8.0, 80),
+                    "wind_speed_mps": np.linspace(4.0, 6.0, 80),
+                    "radiation_wm2": np.linspace(50.0, 150.0, 80),
+                    "humidity_pct": np.linspace(60.0, 70.0, 80),
+                    "day_ahead_price_eur_mwh": np.linspace(49.0, 59.0, 80),
+                    "intraday_price_eur_mwh": np.linspace(50.0, 60.0, 80),
+                    "imbalance_price_eur_mwh": np.linspace(51.0, 61.0, 80),
+                    "intraday_renewable_forecast_mw": np.linspace(8.5, 10.5, 80),
+                }
+            )
+
+            features = build_features(df, cfg)
+
+            self.assertIn("net_load_mw_x_hour_sin", features.columns)
+            self.assertIn("intraday_day_ahead_spread_eur_mwh_x_dow_cos", features.columns)
+            probe = features.iloc[0]
+            self.assertAlmostEqual(
+                probe["net_load_mw_x_hour_sin"],
+                probe["net_load_mw"] * probe["hour_sin"],
+            )
+            self.assertAlmostEqual(
+                probe["renewable_forecast_error_mw_x_dow_cos"],
+                probe["renewable_forecast_error_mw"] * probe["dow_cos"],
+            )
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_adjust_walk_forward_config_shrinks_train_window_when_features_trim_history(self) -> None:
         cfg = AppConfig(
             walk_forward_train_window_days=90,
@@ -308,7 +346,17 @@ class BacktestEngineTests(unittest.TestCase):
 
     def test_run_workflow_defaults_skip_model_comparison_when_missing_from_namespace(self) -> None:
         args = argparse.Namespace(zone="DE_LU", lookback_days=90, simulation_horizon=24, model="xgboost")
-        fake_pipeline = types.SimpleNamespace(merged_df=pd.DataFrame({"timestamp_utc": pd.date_range("2026-01-01", periods=1, freq="h", tz="UTC")}), energy_source="synthetic")
+        fake_pipeline = types.SimpleNamespace(
+            merged_df=pd.DataFrame({"timestamp_utc": pd.date_range("2026-01-01", periods=1, freq="h", tz="UTC")}),
+            energy_source="synthetic",
+            provenance_summary={
+                "real_coverage_ratio": 0.0,
+                "partial_synthetic_coverage_ratio": 0.0,
+                "synthetic_coverage_ratio": 1.0,
+                "research_grade": False,
+            },
+            cache_summary={"energy": {"cache_status": "loaded"}, "weather": {"cache_status": "loaded"}},
+        )
         fake_train = types.SimpleNamespace(
             scored_df=pd.DataFrame({"timestamp_utc": pd.date_range("2026-01-01", periods=1, freq="h", tz="UTC")}),
             metrics_path="metrics.json",
@@ -340,6 +388,55 @@ class BacktestEngineTests(unittest.TestCase):
         self.assertIn("config", result)
         self.assertFalse(result["config"]["skip_model_comparison"])
         self.assertTrue(mock_model_comparison.called)
+        self.assertIn("data_provenance", result)
+        self.assertIn("cache_summary", result)
+
+    def test_run_workflow_normalizes_runtime_modes_from_provenance(self) -> None:
+        args = argparse.Namespace(zone="DE_LU", lookback_days=90, simulation_horizon=24, model="xgboost")
+        fake_pipeline = types.SimpleNamespace(
+            merged_df=pd.DataFrame({"timestamp_utc": pd.date_range("2026-01-01", periods=1, freq="h", tz="UTC")}),
+            energy_source="entsoe_partial_synthetic",
+            provenance_summary={
+                "real_rows": 24,
+                "partially_synthetic_rows": 0,
+                "synthetic_rows": 0,
+                "real_coverage_ratio": 1.0,
+                "partial_synthetic_coverage_ratio": 0.0,
+                "synthetic_coverage_ratio": 0.0,
+                "research_grade": True,
+            },
+            cache_summary={"energy": {"cache_status": "loaded"}, "weather": {"cache_status": "loaded"}},
+        )
+        fake_train = types.SimpleNamespace(
+            scored_df=pd.DataFrame({"timestamp_utc": pd.date_range("2026-01-01", periods=1, freq="h", tz="UTC")}),
+            metrics_path="metrics.json",
+            diagnostics_path="diag.json",
+            scored_path="scored.csv",
+            model_key="xgboost",
+        )
+        fake_backtest = types.SimpleNamespace(result_df=pd.DataFrame({"timestamp_utc": pd.date_range("2026-01-01", periods=1, freq="h", tz="UTC")}), metrics={})
+        fake_strategy = types.SimpleNamespace(
+            strategy_metrics_df=pd.DataFrame([{"strategy_name": "upgraded_strategy", "sharpe_ratio": 1.0}]),
+            significance_df=pd.DataFrame(),
+        )
+        fake_model_comparison = types.SimpleNamespace(summary_df=pd.DataFrame(), summary_csv_path="summary.csv", summary_json_path="summary.json")
+        fake_research = {"summary": {"source": "deterministic_fallback"}, "json_path": "research.json", "note_path": "research.md"}
+
+        with patch("scripts.run_all.ensure_directories"), patch("scripts.run_all.set_global_seed"), patch(
+            "scripts.run_all.run_data_pipeline", return_value=fake_pipeline
+        ), patch("scripts.run_all.build_features", return_value=pd.DataFrame({"timestamp_utc": pd.date_range("2026-01-01", periods=24 * 14, freq="h", tz="UTC")})), patch(
+            "scripts.run_all.run_anomaly_review", return_value={"report": {}, "path": "anomaly.json"}
+        ), patch("scripts.run_all.train_with_model", return_value=fake_train), patch(
+            "scripts.run_all.run_backtest", return_value=fake_backtest
+        ), patch("scripts.run_all.run_strategy_comparison", return_value=fake_strategy), patch(
+            "scripts.run_all.run_model_comparison", return_value=fake_model_comparison
+        ), patch("scripts.run_all.run_realtime_simulation", return_value="sim.jsonl"), patch(
+            "scripts.run_all.write_research_note", return_value=fake_research
+        ):
+            result = run_workflow(args)
+
+        self.assertEqual(result["runtime_modes"]["energy_source"], "entsoe")
+        self.assertTrue(result["runtime_modes"]["research_grade"])
 
     def test_run_all_imports_without_new_backtesting_dependency(self) -> None:
         hf_module = types.ModuleType("huggingface_hub")
@@ -362,6 +459,29 @@ class BacktestEngineTests(unittest.TestCase):
 
             self.assertTrue(callable(run_all.parse_args))
             self.assertTrue(callable(run_all.run_workflow))
+
+    def test_parse_args_supports_cache_controls(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "run_all.py",
+                "--zone",
+                "DE_LU",
+                "--lookback-days",
+                "90",
+                "--model",
+                "xgboost",
+                "--force-refresh",
+                "--rebuild-cache",
+            ],
+        ):
+            import scripts.run_all as run_all
+
+            args = run_all.parse_args()
+
+        self.assertTrue(args.force_refresh)
+        self.assertTrue(args.rebuild_cache)
 
 
 class BacktestCliTests(unittest.TestCase):

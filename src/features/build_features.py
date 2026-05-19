@@ -8,9 +8,26 @@ import numpy as np
 import pandas as pd
 
 from src.config import AppConfig
+from src.data_pipeline.cache import PROVENANCE_COLUMNS
 
 
 LOGGER = logging.getLogger(__name__)
+NON_MODEL_PROVENANCE_COLUMNS = set(
+    PROVENANCE_COLUMNS
+    + [
+        "zone",
+        "weather_data_source",
+        "weather_is_synthetic",
+        "weather_data_quality",
+        "weather_fetch_timestamp_utc",
+        "weather_cache_version",
+        "weather_zone",
+        "weather_cache_lat",
+        "weather_cache_lon",
+        "weather_lat",
+        "weather_lon",
+    ]
+)
 
 
 def _cyclical(series: pd.Series, period: int) -> tuple[pd.Series, pd.Series]:
@@ -177,11 +194,14 @@ def build_features(df: pd.DataFrame, cfg: AppConfig) -> pd.DataFrame:
         std = out[col].rolling(24, min_periods=12).std().replace(0, np.nan)
         out[f"{col}_anomaly"] = (out[col] - mean) / std
 
+    interaction_features: dict[str, pd.Series] = {}
     for interaction_col in ["net_load_mw", "intraday_day_ahead_spread_eur_mwh", "renewable_forecast_error_mw"]:
-        out[f"{interaction_col}_x_hour_sin"] = out[interaction_col].fillna(0.0) * out["hour_sin"]
-        out[f"{interaction_col}_x_dow_cos"] = out[interaction_col].fillna(0.0) * out["dow_cos"]
+        filled = out[interaction_col].fillna(0.0)
+        interaction_features[f"{interaction_col}_x_hour_sin"] = filled * out["hour_sin"]
+        interaction_features[f"{interaction_col}_x_dow_cos"] = filled * out["dow_cos"]
+    out = pd.concat([out, pd.DataFrame(interaction_features, index=out.index)], axis=1)
 
-    numeric_cols = out.select_dtypes(include=[np.number]).columns
+    numeric_cols = [col for col in out.select_dtypes(include=[np.number]).columns if col not in NON_MODEL_PROVENANCE_COLUMNS]
     out[numeric_cols] = out[numeric_cols].replace([np.inf, -np.inf], np.nan)
     out[numeric_cols] = out[numeric_cols].ffill().bfill()
 

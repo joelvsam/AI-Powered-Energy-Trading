@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import logging
-
-import pandas as pd
-from entsoe import EntsoePandasClient
-import requests
 from typing import Callable
 
+import pandas as pd
+import requests
+from entsoe import EntsoePandasClient
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+from src.data_pipeline.cache import ENERGY_VALUE_COLUMNS
+
 LOGGER = logging.getLogger(__name__)
+OPTIONAL_ENTSOE_FEED_POLICY = "skipped_by_default"
+
 
 def _ensure_utc_timestamp(value: pd.Timestamp) -> pd.Timestamp:
     timestamp = pd.Timestamp(value)
@@ -100,6 +106,89 @@ def _parse_intraday_renewable_forecast(raw: pd.Series | pd.DataFrame) -> pd.Data
     return frame[["timestamp_utc", "intraday_renewable_forecast_mw"]]
 
 
+def _rollup_to_hourly(frame: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate mixed-frequency ENTSO-E payloads onto the pipeline hourly index."""
+    if frame.empty:
+        return frame
+    out = frame.copy()
+    out["timestamp_utc"] = pd.to_datetime(out["timestamp_utc"], utc=True, errors="coerce").dt.floor("h")
+    for column in ENERGY_VALUE_COLUMNS:
+        if column in out.columns:
+            out[column] = pd.to_numeric(out[column], errors="coerce")
+    numeric_cols = [col for col in ENERGY_VALUE_COLUMNS if col in out.columns]
+    if not numeric_cols:
+        return (
+            out[["timestamp_utc"]]
+            .dropna()
+            .drop_duplicates(subset=["timestamp_utc"])
+            .sort_values("timestamp_utc")
+            .reset_index(drop=True)
+        )
+    hourly = out.groupby("timestamp_utc", as_index=False)[numeric_cols].mean()
+    return hourly.sort_values("timestamp_utc").reset_index(drop=True)
+
+
+def _session_with_retries() -> requests.Session:
+    session = requests.Session()
+    session.trust_env = False
+    retries = Retry(
+        total=3,
+        backoff_factor=1.0,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retries)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def _fetch_chunk_with_fallback(
+    fetcher: Callable[[pd.Timestamp, pd.Timestamp], pd.Series | pd.DataFrame],
+    parser: Callable[[pd.Series | pd.DataFrame], pd.DataFrame],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    label: str,
+) -> list[pd.DataFrame]:
+    LOGGER.info("Fetching ENTSO-E %s chunk %s -> %s", label, start.isoformat(), end.isoformat())
+    try:
+        raw = fetcher(start, end)
+        return [parser(raw)]
+    except Exception as exc:  # noqa: BLE001
+        span = end - start
+        if span <= pd.Timedelta(days=1):
+            LOGGER.warning(
+                "Skipping ENTSO-E %s chunk %s -> %s after fetch failure: %s",
+                label,
+                start.isoformat(),
+                end.isoformat(),
+                exc,
+            )
+            return []
+        midpoint = start + (span / 2)
+        midpoint = pd.Timestamp(midpoint).ceil("h")
+        if midpoint <= start or midpoint >= end:
+            LOGGER.warning(
+                "Skipping ENTSO-E %s chunk %s -> %s after unsplittable fetch failure: %s",
+                label,
+                start.isoformat(),
+                end.isoformat(),
+                exc,
+            )
+            return []
+        LOGGER.warning(
+            "Retrying ENTSO-E %s chunk %s -> %s in smaller ranges after fetch failure: %s",
+            label,
+            start.isoformat(),
+            end.isoformat(),
+            exc,
+        )
+        left = _fetch_chunk_with_fallback(fetcher, parser, start, midpoint, label)
+        right = _fetch_chunk_with_fallback(fetcher, parser, midpoint, end, label)
+        return [*left, *right]
+
+
 def _fetch_in_chunks(
     fetcher: Callable[[pd.Timestamp, pd.Timestamp], pd.Series | pd.DataFrame],
     parser: Callable[[pd.Series | pd.DataFrame], pd.DataFrame],
@@ -114,9 +203,7 @@ def _fetch_in_chunks(
 
     while chunk_start < end:
         chunk_end = min(chunk_start + delta, end)
-        LOGGER.info("Fetching ENTSO-E %s chunk %s -> %s", label, chunk_start.isoformat(), chunk_end.isoformat())
-        raw = fetcher(chunk_start, chunk_end)
-        frames.append(parser(raw))
+        frames.extend(_fetch_chunk_with_fallback(fetcher, parser, chunk_start, chunk_end, label))
         chunk_start = chunk_end
 
     if not frames:
@@ -125,6 +212,16 @@ def _fetch_in_chunks(
     merged = pd.concat(frames, ignore_index=True)
     merged = merged.drop_duplicates(subset=["timestamp_utc"]).sort_values("timestamp_utc").reset_index(drop=True)
     return merged
+
+
+def _skipped_optional_frame(columns: list[str], *, zone: str, label: str) -> pd.DataFrame:
+    LOGGER.info(
+        "Skipping ENTSO-E %s for %s because optional context feeds are disabled by policy (%s).",
+        label,
+        zone,
+        OPTIONAL_ENTSOE_FEED_POLICY,
+    )
+    return pd.DataFrame(columns=columns)
 
 
 def fetch_entsoe_energy_data(
@@ -136,8 +233,7 @@ def fetch_entsoe_energy_data(
     chunk_days: int = 30,
 ) -> pd.DataFrame:
     """Fetch European power market data with day-ahead and intraday context."""
-    session = requests.Session()
-    session.trust_env = False
+    session = _session_with_retries()
     client = EntsoePandasClient(api_key=api_key, session=session, proxies={}, timeout=timeout_s)
     start = _ensure_utc_timestamp(start)
     end = _ensure_utc_timestamp(end)
@@ -182,64 +278,28 @@ def fetch_entsoe_energy_data(
         label="renewable generation",
     )
 
-    intraday_prices_df = pd.DataFrame(columns=["timestamp_utc", "intraday_price_eur_mwh"])
-    try:
-        intraday_prices_df = _fetch_in_chunks(
-            fetcher=lambda chunk_start, chunk_end: client.query_intraday_prices(
-                country_code=zone,
-                start=chunk_start,
-                end=chunk_end,
-                sequence=1,
-            ),
-            parser=_parse_intraday_prices,
-            start=start,
-            end=end,
-            chunk_days=chunk_days,
-            label="intraday prices",
-        )
-    except Exception as exc:
-        LOGGER.warning("Intraday prices unavailable for %s: %s", zone, exc)
+    intraday_prices_df = _skipped_optional_frame(
+        ["timestamp_utc", "intraday_price_eur_mwh"],
+        zone=zone,
+        label="intraday prices",
+    )
 
-    imbalance_prices_df = pd.DataFrame(
-        columns=[
+    imbalance_prices_df = _skipped_optional_frame(
+        [
             "timestamp_utc",
             "imbalance_price_eur_mwh",
             "imbalance_price_buy_eur_mwh",
             "imbalance_price_sell_eur_mwh",
-        ]
+        ],
+        zone=zone,
+        label="imbalance prices",
     )
-    try:
-        imbalance_prices_df = _fetch_in_chunks(
-            fetcher=lambda chunk_start, chunk_end: client.query_imbalance_prices(
-                country_code=zone,
-                start=chunk_start,
-                end=chunk_end,
-            ),
-            parser=_parse_imbalance_prices,
-            start=start,
-            end=end,
-            chunk_days=chunk_days,
-            label="imbalance prices",
-        )
-    except Exception as exc:
-        LOGGER.warning("Imbalance prices unavailable for %s: %s", zone, exc)
 
-    intraday_renewable_forecast_df = pd.DataFrame(columns=["timestamp_utc", "intraday_renewable_forecast_mw"])
-    try:
-        intraday_renewable_forecast_df = _fetch_in_chunks(
-            fetcher=lambda chunk_start, chunk_end: client.query_intraday_wind_and_solar_forecast(
-                country_code=zone,
-                start=chunk_start,
-                end=chunk_end,
-            ),
-            parser=_parse_intraday_renewable_forecast,
-            start=start,
-            end=end,
-            chunk_days=chunk_days,
-            label="intraday renewable forecast",
-        )
-    except Exception as exc:
-        LOGGER.warning("Intraday renewable forecast unavailable for %s: %s", zone, exc)
+    intraday_renewable_forecast_df = _skipped_optional_frame(
+        ["timestamp_utc", "intraday_renewable_forecast_mw"],
+        zone=zone,
+        label="intraday renewable forecast",
+    )
 
     merged = (
         prices_df.rename(columns={"price_eur_mwh": "day_ahead_price_eur_mwh"})
@@ -256,4 +316,4 @@ def fetch_entsoe_energy_data(
         merged["day_ahead_price_eur_mwh"],
     )
     merged["intraday_day_ahead_spread_eur_mwh"] = merged["intraday_price_eur_mwh"] - merged["day_ahead_price_eur_mwh"]
-    return merged.sort_values("timestamp_utc").reset_index(drop=True)
+    return _rollup_to_hourly(merged)

@@ -21,6 +21,7 @@ class AppConfig:
     project_root: Path = Path(__file__).resolve().parents[1]
     data_raw_dir: Path = project_root / "data" / "raw"
     data_processed_dir: Path = project_root / "data" / "processed"
+    cache_dir: Path = project_root / "cache"
     models_dir: Path = project_root / "artifacts" / "models"
     simulation_dir: Path = project_root / "artifacts" / "simulation"
     research_dir: Path = project_root / "artifacts" / "research"
@@ -33,6 +34,11 @@ class AppConfig:
     entsoe_api_key: str | None = os.getenv("ENTSOE_API_KEY")
     entsoe_timeout_s: int = int(os.getenv("ENTSOE_TIMEOUT_S", "90"))
     entsoe_chunk_days: int = int(os.getenv("ENTSOE_CHUNK_DAYS", "30"))
+    cache_schema_version: int = int(os.getenv("CACHE_SCHEMA_VERSION", "1"))
+    cache_enabled: bool = os.getenv("CACHE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    cache_atomic_write_enabled: bool = os.getenv("CACHE_ATOMIC_WRITE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    cache_rebuild_default: bool = os.getenv("CACHE_REBUILD_DEFAULT", "false").strip().lower() in {"1", "true", "yes", "on"}
+    cache_max_gap_fill_hours: int = int(os.getenv("CACHE_MAX_GAP_FILL_HOURS", "720"))
 
     hf_token: str | None = os.getenv("HF_TOKEN")
     hf_model: str = os.getenv("HF_MODEL", "Qwen/Qwen2.5-72B-Instruct")
@@ -73,7 +79,7 @@ class AppConfig:
 
 def ensure_directories(cfg: AppConfig) -> None:
     """Ensure output directories exist."""
-    for directory in [cfg.data_raw_dir, cfg.data_processed_dir, cfg.models_dir, cfg.simulation_dir, cfg.research_dir]:
+    for directory in [cfg.data_raw_dir, cfg.data_processed_dir, cfg.cache_dir, cfg.models_dir, cfg.simulation_dir, cfg.research_dir]:
         directory.mkdir(parents=True, exist_ok=True)
 
 

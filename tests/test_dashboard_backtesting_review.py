@@ -140,7 +140,16 @@ class DashboardBacktestingReviewTests(unittest.TestCase):
         with patch("dashboard.backtesting_review.run_data_pipeline") as mock_pipeline, patch(
             "dashboard.backtesting_review.build_features"
         ) as mock_build_features, patch("dashboard.backtesting_review.run_model_comparison") as mock_run_model_comparison:
-            mock_pipeline.return_value = type("PipelineOut", (), {"merged_df": pd.DataFrame({"x": [1]}), "energy_source": "synthetic"})()
+            mock_pipeline.return_value = type(
+                "PipelineOut",
+                (),
+                {
+                    "merged_df": pd.DataFrame({"x": [1]}),
+                    "energy_source": "synthetic",
+                    "provenance_summary": {"synthetic_coverage_ratio": 1.0},
+                    "cache_summary": {"energy": {"cache_status": "loaded"}},
+                },
+            )()
             mock_build_features.return_value = pd.DataFrame({"timestamp_utc": pd.date_range("2026-01-01", periods=1, freq="h", tz="UTC")})
             mock_run_model_comparison.return_value = type(
                 "ComparisonResult",
@@ -153,6 +162,8 @@ class DashboardBacktestingReviewTests(unittest.TestCase):
         self.assertEqual(list(loaded_df["model_key"]), ["xgboost"])
         self.assertEqual(metadata["winner_model"], "xgboost")
         self.assertEqual(metadata["energy_source"], "synthetic")
+        self.assertIn("provenance_summary", metadata)
+        self.assertIn("cache_summary", metadata)
 
 
 if __name__ == "__main__":

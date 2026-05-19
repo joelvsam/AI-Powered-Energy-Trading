@@ -15,6 +15,7 @@ from src.config import AppConfig
 
 def _fallback_research_payload(summary_payload: dict[str, Any]) -> dict[str, Any]:
     significance_rows = summary_payload.get("significance", [])
+    provenance_summary = summary_payload.get("provenance_summary", {})
     not_significant = [
         row["baseline_name"]
         for row in significance_rows
@@ -25,8 +26,14 @@ def _fallback_research_payload(summary_payload: dict[str, Any]) -> dict[str, Any
         edge_summary = "Insufficient significance evidence; treat results as exploratory."
     weaknesses = [
         "Performance may degrade when execution costs dominate forecast edge.",
-        "Results using synthetic energy data are not credible for production trading claims.",
+        "Results with synthetic or partially synthetic market rows require explicit caution in research interpretation.",
     ]
+    if provenance_summary:
+        weaknesses.append(
+            "Synthetic coverage: "
+            f"{provenance_summary.get('synthetic_coverage_ratio', 0.0):.1%}; "
+            f"partial synthetic coverage: {provenance_summary.get('partial_synthetic_coverage_ratio', 0.0):.1%}."
+        )
     if not_significant:
         weaknesses.append(f"No significant outperformance versus: {', '.join(not_significant)}.")
     return {
@@ -57,9 +64,11 @@ def write_research_note(
     significance_df: pd.DataFrame,
     anomaly_report: dict[str, Any],
     energy_source: str,
+    provenance_summary: dict[str, Any],
 ) -> dict[str, Any]:
     payload = {
         "energy_source": energy_source,
+        "provenance_summary": provenance_summary,
         "model_summary": model_summary_df.to_dict(orient="records"),
         "strategy_metrics": strategy_metrics_df.to_dict(orient="records"),
         "significance": significance_df.to_dict(orient="records"),
@@ -72,12 +81,15 @@ def write_research_note(
         fallback_payload=fallback,
         cfg=cfg,
     )
-    research_summary["energy_source_research_grade"] = energy_source != "synthetic"
+    research_summary["energy_source_research_grade"] = bool(provenance_summary.get("research_grade", False))
+    research_summary["provenance_summary"] = provenance_summary
 
     note_lines = [
         "# Trading Research Note",
         "",
         f"Research grade data: {'yes' if research_summary['energy_source_research_grade'] else 'no'}",
+        f"Synthetic coverage: {float(provenance_summary.get('synthetic_coverage_ratio', 0.0)):.1%}",
+        f"Partial synthetic coverage: {float(provenance_summary.get('partial_synthetic_coverage_ratio', 0.0)):.1%}",
         "",
         "## Strategy Description",
         "The strategy combines forecast, mean-reversion, and fundamental imbalance signals with regime-aware sizing and realistic execution costs.",

@@ -6,6 +6,7 @@ Why should this strategy make money in real European power markets after realist
 
 The pipeline answers that question by combining:
 
+- canonical raw-data parquet caches with schema validation, provenance tracking, and partial synthetic gap filling
 - walk-forward forecasting with `xgboost`, `lstm`, and `prophet`
 - market-structure-aware features for day-ahead, intraday, renewables, and imbalance context
 - multiple signal families instead of a single forecast delta
@@ -31,15 +32,22 @@ These matter in European power markets because:
 
 The research workflow evaluates when those ideas work, when they fail, and whether they beat simple alternatives with statistical credibility.
 
-## What Changed
+## System Design
 
-The repo now includes:
+The repository includes:
 
 - richer ENTSO-E market context:
   - day-ahead prices
   - intraday prices when available
   - imbalance prices when available
   - intraday renewable forecast when available
+- incremental raw-data persistence:
+  - canonical parquet caches under `cache/`
+  - one file per dataset and zone such as `cache/entsoe_DE_LU.parquet`
+  - fetch-only-missing-range behavior on repeated runs
+  - row-level provenance fields including source, synthetic status, quality, fetch timestamp, and cache version
+  - atomic cache writes with validation before replace
+  - explicit cache rebuild and force-refresh controls
 - expanded features:
   - intraday-day-ahead spread
   - renewable forecast error proxies
@@ -79,13 +87,14 @@ The main entry point is `scripts/run_all.py`.
 It runs:
 
 1. data ingestion and cleaning
-2. feature engineering
-3. anomaly review
-4. primary model training
-5. realistic backtest
-6. strategy comparison versus baselines
-7. cross-model trading comparison
-8. final research-note generation
+2. raw-data cache validation, incremental fetch, and partial synthetic gap filling
+3. feature engineering
+4. anomaly review
+5. primary model training
+6. realistic backtest
+7. strategy comparison versus baselines
+8. cross-model trading comparison
+9. final research-note generation
 
 ## Running It
 
@@ -108,6 +117,18 @@ Run the full research workflow:
 python -m scripts.run_all --lookback-days 180 --zone DE_LU --model xgboost
 ```
 
+Refetch only the selected historical window while preserving the rest of the cache:
+
+```bash
+python -m scripts.run_all --lookback-days 180 --zone DE_LU --model xgboost --force-refresh
+```
+
+Rebuild the canonical raw-data cache for the selected run:
+
+```bash
+python -m scripts.run_all --lookback-days 180 --zone DE_LU --model xgboost --rebuild-cache
+```
+
 Run cross-model comparison directly:
 
 ```bash
@@ -127,6 +148,13 @@ streamlit run dashboard/app.py
 ```
 
 ## Artifact Map
+
+Canonical raw-data caches live under `cache/`:
+
+- `cache/entsoe_<zone>.parquet`
+- `cache/weather_<zone>.parquet`
+
+These caches store only raw market and raw weather context. They do not store engineered features, signals, predictions, or backtest outputs.
 
 The canonical research bundle lives under `artifacts/research/`.
 
@@ -175,15 +203,21 @@ The system is designed to answer:
 
 The implementation explicitly avoids common failure modes:
 
+- no caching of feature-engineered or model-ready datasets
+- no silent overwrite of historical real rows with synthetic rows
+- no direct cache overwrite without validation and atomic replace
 - walk-forward scoring instead of in-sample evaluation
 - no same-bar execution lookahead
 - no fake performance inflation
 - no reliance on a cosmetic LLM report
 - no test-set tuning of signal parameters
+- no hidden synthetic contamination in research outputs
 
 ## Important Caveat
 
-If ENTSO-E ingestion fails, the pipeline can fall back to synthetic energy data. That keeps the repo runnable, but those runs are not research-grade evidence for a real trading strategy. The research outputs mark this explicitly.
+The cache layer is a research-integrity component, not only a runtime optimization. Repeated runs reuse validated raw history, fetch only missing hourly ranges, and synthesize only unresolved gaps. Research outputs and dashboard runtime diagnostics report real, partially synthetic, and fully synthetic coverage explicitly.
+
+If ENTSO-E or weather retrieval leaves unresolved gaps, the pipeline remains runnable by filling only those timestamps synthetically. That keeps the repo operational, but any synthetic contamination must be treated cautiously in research interpretation. The research outputs mark this explicitly.
 
 ## Repo Structure
 

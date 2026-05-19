@@ -48,14 +48,15 @@ What does the repository actually do?
 At a high level, it does this:
 
 1. Collect market and weather data.
-2. Clean the data.
-3. Create useful features from the raw data.
-4. Train forecasting models.
-5. Turn forecasts and structural market information into trading signals.
-6. Simulate trading with realistic frictions like spread and slippage.
-7. Compare the strategy against strong simple baselines.
-8. Check whether outperformance looks statistically meaningful.
-9. Produce a research-style note explaining what worked, what failed, and why.
+2. Reuse validated raw-data cache history and fetch only missing ranges.
+3. Clean the data.
+4. Create useful features from the raw data.
+5. Train forecasting models.
+6. Turn forecasts and structural market information into trading signals.
+7. Simulate trading with realistic frictions like spread and slippage.
+8. Compare the strategy against strong simple baselines.
+9. Check whether outperformance looks statistically meaningful.
+10. Produce a research-style note explaining what worked, what failed, and why.
 
 That last part matters a lot.
 
@@ -194,6 +195,12 @@ marketing theater.
 
 In this repository, "research-grade" means:
 
+- canonical raw-data caches for market and weather history rather than
+  refetching the entire window every run
+- cache validation with schema checks, duplicate protection, timezone
+  consistency, and atomic writes
+- row-level provenance showing whether each raw row is real, partially
+  synthetic, or fully synthetic
 - walk-forward validation instead of naive random splits
 - automatic adjustment of the train window when feature engineering trims the
   usable sample but still leaves enough history for honest walk-forward testing
@@ -207,6 +214,83 @@ In this repository, "research-grade" means:
   unavailable
 - explicit marking of synthetic data runs as non-research-grade
 - honest reporting of limitations
+
+Why cache raw data at all?
+
+Because repeated research runs often overlap heavily in history.
+
+If you rerun a 180-day study today and then rerun a 365-day study tomorrow,
+most of the older timestamps are the same observations.
+
+Re-downloading or regenerating that entire history every time wastes time and
+creates unnecessary operational fragility.
+
+But a serious cache must be careful.
+
+It cannot behave like a casual performance shortcut.
+
+It must behave like a market-data persistence layer.
+
+That means:
+
+- only raw market and weather data are cached
+- engineered features are not cached
+- predictions are not cached
+- backtests are not cached
+- cache writes are validated before they replace the previous file
+- synthetic rows stay visible instead of pretending to be real history
+
+Why cache only raw data?
+
+Because raw data is the stable upstream input.
+
+Features, signals, predictions, and backtests depend on modeling choices.
+If you cached those layers, you could accidentally freeze old research logic
+and create stale results that look current.
+
+Caching raw data speeds up reruns without bypassing the honest recomputation
+of everything downstream.
+
+Why provenance matters:
+
+Suppose an intraday endpoint fails for 8 hours in the middle of your sample.
+
+If the system silently fills those rows and forgets about it, you may treat
+those periods as equally trustworthy to fully real market data.
+
+That is dangerous.
+
+So every cached raw row carries a truth label:
+
+- real
+- partially synthetic
+- synthetic
+
+This keeps the research note, dashboard, and analyst aware of data quality
+instead of hiding it behind a smooth dataframe.
+
+Why partial synthetic fallback is better than replacing the whole dataset:
+
+If 95% of a historical window is real and 5% is unavailable, throwing away the
+real 95% would be wasteful and less honest than preserving it.
+
+A better design is:
+
+- keep the real rows
+- fetch only missing timestamp ranges
+- synthesize only unresolved rows or fields
+- report exactly how much contamination remains
+
+This preserves useful history while still respecting uncertainty.
+
+How leakage risk is avoided in the cache:
+
+The cache stores rows by timestamp and source provenance.
+It does not store future-aware engineered features.
+It does not let synthetic rows overwrite better real rows.
+It does not recompute old history from future signals.
+And it only refreshes the requested raw window unless a full rebuild is asked
+for explicitly.
 
 That honesty matters.
 
@@ -2644,6 +2728,12 @@ Synthetic fallback dangers:
 Synthetic data is useful for infrastructure testing, but dangerous if users
 forget that synthetic success is not market success.
 
+Partial synthetic regions require caution too.
+
+A run can still be operationally useful if only a small fraction of rows are
+synthetic or partially synthetic, but the contamination must remain visible in
+research interpretation.
+
 Parameter instability:
 
 A parameter that looks good today may degrade tomorrow.
@@ -2986,6 +3076,10 @@ enough to survive real-world trading friction?"
 
 So the repository begins by collecting market and weather data.
 
+It keeps that raw history in canonical parquet caches for each source and
+zone, validates those caches carefully, and fetches only the missing hourly
+ranges for the next run.
+
 It tries to understand:
 
 - what day-ahead prices said
@@ -2995,6 +3089,8 @@ It tries to understand:
 - what the weather was doing
 
 Then it cleans that data, because raw data is noisy and can betray you.
+It may interpolate small bounded gaps, but it keeps provenance visible so
+cleaning does not magically turn synthetic regions into real ones.
 
 Then it engineers features, because raw numbers alone do not explain the market
 well enough.

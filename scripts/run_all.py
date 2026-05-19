@@ -23,6 +23,17 @@ from src.simulation.realtime_loop import run_realtime_simulation
 from src.trading.backtest import run_backtest
 
 
+def _energy_mode_from_provenance(summary: dict[str, Any]) -> str:
+    synthetic_rows = int(summary.get("synthetic_rows", 0))
+    partial_rows = int(summary.get("partially_synthetic_rows", 0))
+    real_rows = int(summary.get("real_rows", 0))
+    if synthetic_rows > 0 and real_rows == 0 and partial_rows == 0:
+        return "synthetic"
+    if synthetic_rows > 0 or partial_rows > 0:
+        return "entsoe_partial_synthetic"
+    return "entsoe"
+
+
 def _min_walk_forward_rows(cfg: AppConfig) -> int:
     test_window = int(cfg.walk_forward_test_window_days) * 24
     return int(max(test_window * 2, (int(cfg.walk_forward_train_window_days) + int(cfg.walk_forward_test_window_days)) * 24))
@@ -80,6 +91,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip the full cross-model comparison pass.",
     )
+    parser.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help="Refetch the requested raw-data window even when cache rows already exist.",
+    )
+    parser.add_argument(
+        "--rebuild-cache",
+        action="store_true",
+        help="Ignore existing raw-data cache files for the selected window and rebuild them from scratch.",
+    )
     return parser.parse_args()
 
 
@@ -106,7 +127,13 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
     skip_model_comparison = bool(getattr(args, "skip_model_comparison", False))
 
     logging.info("1/8 Ingest-Clean-Merge pipeline")
-    pipeline_out = run_data_pipeline(cfg=cfg, zone=args.zone, lookback_days=args.lookback_days)
+    pipeline_out = run_data_pipeline(
+        cfg=cfg,
+        zone=args.zone,
+        lookback_days=args.lookback_days,
+        force_refresh=bool(getattr(args, "force_refresh", False)),
+        rebuild_cache=bool(getattr(args, "rebuild_cache", False)),
+    )
 
     logging.info("2/8 Feature engineering")
     features = build_features(pipeline_out.merged_df, cfg)
@@ -170,7 +197,12 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
         significance_df=selected_strategy_result.significance_df,
         anomaly_report=anomaly_review["report"],
         energy_source=pipeline_out.energy_source,
+        provenance_summary=pipeline_out.provenance_summary,
     )
+
+    normalized_provenance = dict(pipeline_out.provenance_summary)
+    normalized_energy_source = _energy_mode_from_provenance(normalized_provenance)
+    normalized_research_grade = bool(normalized_provenance.get("research_grade", False))
 
     logging.info("Research workflow complete. Note: %s", research_note["note_path"])
     return {
@@ -179,13 +211,17 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
             "lookback_days": args.lookback_days or cfg.lookback_days,
             "model": args.model,
             "skip_model_comparison": skip_model_comparison,
+            "force_refresh": bool(getattr(args, "force_refresh", False)),
+            "rebuild_cache": bool(getattr(args, "rebuild_cache", False)),
         },
         "runtime_modes": {
-            "energy_source": pipeline_out.energy_source,
+            "energy_source": normalized_energy_source,
             "research_source": research_note["summary"].get("source", "unknown"),
             "llm_model": cfg.hf_model,
-            "research_grade": pipeline_out.energy_source != "synthetic",
+            "research_grade": normalized_research_grade,
         },
+        "data_provenance": normalized_provenance,
+        "cache_summary": pipeline_out.cache_summary,
         "features_df": features,
         "scored_df": train_out.scored_df,
         "backtest_df": backtest_out.result_df,
