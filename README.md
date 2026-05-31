@@ -1,4 +1,4 @@
-AI Powered Energy Forecasting & Trading Decision System:
+## AI Powered Energy Forecasting & Trading Decision System:
 
 This repository is a trading research system. The core question is:
 
