@@ -36,7 +36,7 @@ The research workflow evaluates when those ideas work, when they fail, and wheth
 
 The repository includes:
 
-- richer ENTSO-E market context:
+- ENTSO-E market context:
   - day-ahead prices
   - intraday prices when available
   - imbalance prices when available
