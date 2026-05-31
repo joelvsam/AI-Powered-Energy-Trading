@@ -1,6 +1,6 @@
-# Research-Grade Energy Trading
+AI Powered Energy Forecasting & Trading Decision System:
 
-This repository is now organized as a trading research system, not a generic ML demo. The core question is:
+This repository is a trading research system. The core question is:
 
 Why should this strategy make money in real European power markets after realistic execution costs, delays, and baseline comparisons?
 
