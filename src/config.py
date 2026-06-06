@@ -13,6 +13,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+BIDDING_ZONE_OPENMETEO_COORDS: dict[str, tuple[float, float]] = {
+    "DE_LU": (52.52, 13.405),
+    "FR": (48.8566, 2.3522),
+    "NL": (52.3676, 4.9041),
+}
+
 
 @dataclass(frozen=True)
 class AppConfig:
@@ -48,6 +54,20 @@ class AppConfig:
     openmeteo_lon: float = float(os.getenv("OPENMETEO_LON", "13.405"))
 
     tcost_bps: float = float(os.getenv("TCOST_BPS", "5.0"))
+
+    def openmeteo_coords_for_zone(self, zone: str | None = None) -> tuple[float, float]:
+        if zone:
+            normalized_zone = zone.strip().upper()
+            coords = BIDDING_ZONE_OPENMETEO_COORDS.get(normalized_zone)
+            if coords is not None:
+                return coords
+        return self.openmeteo_lat, self.openmeteo_lon
+
+    def openmeteo_lat_for_zone(self, zone: str | None = None) -> float:
+        return self.openmeteo_coords_for_zone(zone)[0]
+
+    def openmeteo_lon_for_zone(self, zone: str | None = None) -> float:
+        return self.openmeteo_coords_for_zone(zone)[1]
     annualization_factor: int = int(os.getenv("ANNUALIZATION_FACTOR", "24"))
     backtest_notional_eur: float = float(os.getenv("BACKTEST_NOTIONAL_EUR", "10000.0"))
     enable_new_signal: bool = os.getenv("ENABLE_NEW_SIGNAL", "true").strip().lower() in {"1", "true", "yes", "on"}

@@ -64,6 +64,20 @@ def build_quarter_hour_energy_frame(start: pd.Timestamp, end: pd.Timestamp) -> p
     )
 
 
+def build_weather_frame(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    index = pd.date_range(start=start, end=end - pd.Timedelta(hours=1), freq="h", tz="UTC")
+    values = list(range(len(index)))
+    return pd.DataFrame(
+        {
+            "timestamp_utc": index,
+            "temperature_c": [8.0 + 0.5 * x for x in values],
+            "wind_speed_mps": [4.0 + 0.1 * x for x in values],
+            "radiation_wm2": [120.0 + 2.0 * x for x in values],
+            "humidity_pct": [65.0 + 0.2 * x for x in values],
+        }
+    )
+
+
 class DataCacheTests(unittest.TestCase):
     def test_incremental_fetch_uses_cache_and_fetches_only_tail_gap(self) -> None:
         temp_dir = make_workspace_temp_dir()
@@ -140,6 +154,42 @@ class DataCacheTests(unittest.TestCase):
                 source_label="entsoe",
             )
             self.assertTrue((refreshed_df["data_quality"] == "real").all())
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_openmeteo_coords_for_zone_returns_zone_specific_coordinates(self) -> None:
+        temp_dir = make_workspace_temp_dir()
+        try:
+            cfg = AppConfig(project_root=temp_dir, cache_dir=temp_dir / "cache")
+            self.assertEqual(cfg.openmeteo_coords_for_zone("DE_LU"), (52.52, 13.405))
+            self.assertEqual(cfg.openmeteo_coords_for_zone("FR"), (48.8566, 2.3522))
+            self.assertEqual(cfg.openmeteo_coords_for_zone("NL"), (52.3676, 4.9041))
+            self.assertEqual(cfg.openmeteo_coords_for_zone("unknown"), (cfg.openmeteo_lat, cfg.openmeteo_lon))
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_weather_cache_annotations_use_zone_coordinates(self) -> None:
+        temp_dir = make_workspace_temp_dir()
+        try:
+            cfg = AppConfig(project_root=temp_dir, cache_dir=temp_dir / "cache")
+            ensure_directories(cfg)
+            start = pd.Timestamp("2026-01-01 00:00:00+00:00")
+            end = pd.Timestamp("2026-01-01 03:00:00+00:00")
+
+            resolved, diagnostics = resolve_dataset_with_cache(
+                cfg=cfg,
+                dataset_name="weather",
+                zone="FR",
+                start=start,
+                end=end,
+                fetcher=lambda range_start, range_end: build_weather_frame(range_start, range_end),
+                synthetic_builder=lambda idx: build_weather_frame(idx.min(), idx.max() + pd.Timedelta(hours=1)),
+                source_label="openmeteo",
+            )
+
+            self.assertTrue((resolved["weather_lat"].astype(float).round(6) == 48.8566).all())
+            self.assertTrue((resolved["weather_lon"].astype(float).round(6) == 2.3522).all())
+            self.assertEqual(diagnostics.cache_used, False)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

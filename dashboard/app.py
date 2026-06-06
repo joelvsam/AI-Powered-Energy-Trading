@@ -32,6 +32,7 @@ from dashboard.charts import (
     render_review_accuracy_chart,
 )
 from scripts.run_all import run_workflow
+from src.config import AppConfig
 
 
 st.set_page_config(page_title="Energy Trading Dashboard", layout="wide")
@@ -299,6 +300,9 @@ def _render_pipeline_page() -> None:
     _render_environment_diagnostics()
 
     region = st.selectbox("Region", options=["DE_LU", "FR", "NL"], index=0)
+    cfg = AppConfig()
+    weather_lat, weather_lon = cfg.openmeteo_coords_for_zone(region)
+    st.caption(f"Open-Meteo coordinates for selected region: {weather_lat:.4f}, {weather_lon:.4f}")
     lookback_days = st.selectbox("Training Window (days)", options=[90, 180, 365], index=1)
     model = st.selectbox("Model", options=["xgboost", "lstm", "prophet"], index=0)
     horizon = st.slider("Simulation Horizon", min_value=12, max_value=168, value=24, step=12)

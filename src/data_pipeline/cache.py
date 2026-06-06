@@ -168,8 +168,9 @@ def validate_cache_frame(
     if dataset_name == "weather" and not df.empty:
         latitudes = set(pd.to_numeric(df["weather_lat"], errors="coerce").dropna().round(6).tolist())
         longitudes = set(pd.to_numeric(df["weather_lon"], errors="coerce").dropna().round(6).tolist())
-        expected_lat = round(float(cfg.openmeteo_lat), 6)
-        expected_lon = round(float(cfg.openmeteo_lon), 6)
+        expected_lat, expected_lon = cfg.openmeteo_coords_for_zone(zone)
+        expected_lat = round(float(expected_lat), 6)
+        expected_lon = round(float(expected_lon), 6)
         if latitudes and latitudes != {expected_lat}:
             raise ValueError(f"Weather cache latitude mismatch: {latitudes} vs expected {expected_lat}")
         if longitudes and longitudes != {expected_lon}:
@@ -294,8 +295,9 @@ def annotate_source_rows(
     out["cache_version"] = cfg.cache_schema_version
     out["zone"] = zone
     if dataset_name == "weather":
-        out["weather_lat"] = float(cfg.openmeteo_lat)
-        out["weather_lon"] = float(cfg.openmeteo_lon)
+        weather_lat, weather_lon = cfg.openmeteo_coords_for_zone(zone)
+        out["weather_lat"] = float(weather_lat)
+        out["weather_lon"] = float(weather_lon)
     required_present = out[required_cols].notna().all(axis=1)
     out["data_quality"] = "real"
     out.loc[~required_present, "data_quality"] = "partially_synthetic"
@@ -354,8 +356,9 @@ def apply_synthetic_overlay(
     out["cache_version"] = cfg.cache_schema_version
     out["zone"] = zone
     if dataset_name == "weather":
-        out["weather_lat"] = float(cfg.openmeteo_lat)
-        out["weather_lon"] = float(cfg.openmeteo_lon)
+        weather_lat, weather_lon = cfg.openmeteo_coords_for_zone(zone)
+        out["weather_lat"] = float(weather_lat)
+        out["weather_lon"] = float(weather_lon)
     return _normalize_cache_frame(out.reset_index(), dataset_name)
 
 

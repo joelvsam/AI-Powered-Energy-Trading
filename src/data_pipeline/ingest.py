@@ -108,12 +108,13 @@ def _session() -> requests.Session:
     return session
 
 
-def fetch_openmeteo_weather(start: pd.Timestamp, end: pd.Timestamp, cfg: AppConfig) -> pd.DataFrame:
-    """Fetch hourly weather from Open-Meteo."""
+def fetch_openmeteo_weather(start: pd.Timestamp, end: pd.Timestamp, cfg: AppConfig, *, zone: str | None = None) -> pd.DataFrame:
+    """Fetch hourly weather from Open-Meteo using zone-specific coordinates."""
     url = "https://archive-api.open-meteo.com/v1/archive"
+    latitude, longitude = cfg.openmeteo_coords_for_zone(zone)
     params = {
-        "latitude": cfg.openmeteo_lat,
-        "longitude": cfg.openmeteo_lon,
+        "latitude": latitude,
+        "longitude": longitude,
         "hourly": "temperature_2m,wind_speed_10m,shortwave_radiation,relative_humidity_2m",
         "timezone": "UTC",
         "start_date": start.strftime("%Y-%m-%d"),
@@ -173,7 +174,7 @@ def ingest_data(
         )
 
     def _weather_fetcher(range_start: pd.Timestamp, range_end: pd.Timestamp) -> pd.DataFrame:
-        return fetch_openmeteo_weather(start=range_start, end=range_end, cfg=cfg)
+        return fetch_openmeteo_weather(start=range_start, end=range_end, cfg=cfg, zone=selected_zone)
 
     energy_df, energy_cache_diag = resolve_dataset_with_cache(
         cfg=cfg,

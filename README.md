@@ -150,6 +150,7 @@ Edit `.env` and set required secrets and configuration. Important variables incl
 - `ENTSOE_API_KEY` (required for real ENTSO-E data)
 - `HF_TOKEN` (optional; required for HuggingFace LLM calls)
 - `ENTSOE_BIDDING_ZONE` (default: `DE_LU`)
+- `OPENMETEO_LAT` / `OPENMETEO_LON` (default Berlin coords; overridden automatically by selected bidding zone in the dashboard for `DE_LU`, `FR`, and `NL`)
 - `SEED` (random seed, default: `42`)
 - `CACHE_ENABLED` (toggle cache behavior)
 
