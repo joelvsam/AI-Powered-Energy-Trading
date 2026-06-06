@@ -37,6 +37,234 @@ from scripts.run_all import run_workflow
 st.set_page_config(page_title="Energy Trading Dashboard", layout="wide")
 
 
+def _render_dashboard_theme() -> None:
+    st.markdown(
+        """
+        <style>
+        :root {
+            --quant-bg: #0b0f10;
+            --quant-surface: #101415;
+            --quant-sidebar: #191c1e;
+            --quant-card: #1d2022;
+            --quant-card-high: #272a2c;
+            --quant-border: #323537;
+            --quant-border-soft: #434655;
+            --quant-text: #e0e3e5;
+            --quant-muted: #c3c6d7;
+            --quant-subtle: #8d90a0;
+            --quant-primary: #b4c5ff;
+            --quant-primary-strong: #2563eb;
+            --quant-green: #34d399;
+            --quant-red: #ffb4ab;
+            --quant-warning: #fbbf24;
+            --quant-radius: 8px;
+            --quant-mono: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+            --quant-sans: Inter, "Segoe UI", Roboto, Arial, sans-serif;
+        }
+
+        .stApp {
+            background: var(--quant-bg);
+            color: var(--quant-text);
+            font-family: var(--quant-sans);
+        }
+
+        .block-container {
+            padding-top: 2rem;
+            padding-bottom: 3rem;
+            max-width: 1280px;
+        }
+
+        [data-testid="stSidebar"] {
+            background: var(--quant-sidebar);
+            border-right: 1px solid var(--quant-border-soft);
+        }
+
+        [data-testid="stSidebar"] * {
+            color: var(--quant-text);
+        }
+
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] .stCaptionContainer {
+            color: var(--quant-muted);
+        }
+
+        h1, h2, h3 {
+            color: var(--quant-text);
+            letter-spacing: 0;
+        }
+
+        h1 {
+            font-size: 2.25rem;
+            font-weight: 700;
+            line-height: 1.15;
+        }
+
+        h2, h3 {
+            border-bottom: 1px solid var(--quant-border);
+            padding-bottom: 0.35rem;
+        }
+
+        p, span, label, div {
+            letter-spacing: 0;
+        }
+
+        [data-testid="stCaptionContainer"],
+        [data-testid="stMarkdownContainer"] p {
+            color: var(--quant-muted);
+        }
+
+        [data-testid="stMetric"] {
+            background: var(--quant-card);
+            border: 1px solid var(--quant-border);
+            border-radius: var(--quant-radius);
+            padding: 1rem;
+            min-height: 96px;
+            box-shadow: none;
+        }
+
+        [data-testid="stMetricLabel"] {
+            color: var(--quant-muted);
+            font-size: 0.72rem;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        [data-testid="stMetricValue"] {
+            color: var(--quant-text);
+            font-family: var(--quant-mono);
+            font-weight: 600;
+        }
+
+        [data-testid="stMetricDelta"] {
+            font-family: var(--quant-mono);
+        }
+
+        div[data-testid="stAlert"] {
+            background: var(--quant-card);
+            border: 1px solid var(--quant-border-soft);
+            border-radius: var(--quant-radius);
+            color: var(--quant-text);
+        }
+
+        div[data-testid="stExpander"] {
+            background: var(--quant-surface);
+            border: 1px solid var(--quant-border);
+            border-radius: var(--quant-radius);
+        }
+
+        div[data-testid="stExpander"] summary {
+            color: var(--quant-muted);
+            font-weight: 600;
+        }
+
+        .stButton > button {
+            background: var(--quant-primary-strong);
+            border: 1px solid var(--quant-primary-strong);
+            border-radius: var(--quant-radius);
+            color: #eef0ff;
+            font-weight: 700;
+            min-height: 2.5rem;
+        }
+
+        .stButton > button:hover {
+            background: #2f6ff2;
+            border-color: var(--quant-primary);
+            color: #ffffff;
+        }
+
+        .stButton > button:focus,
+        .stButton > button:active {
+            box-shadow: 0 0 0 2px rgba(180, 197, 255, 0.28);
+        }
+
+        div[data-baseweb="select"] > div,
+        div[data-baseweb="input"] > div,
+        [data-testid="stDateInput"] input,
+        [data-testid="stNumberInput"] input,
+        [data-testid="stTextInput"] input {
+            background: var(--quant-surface);
+            border-color: var(--quant-border-soft);
+            border-radius: 6px;
+            color: var(--quant-text);
+        }
+
+        div[data-baseweb="select"] span,
+        input,
+        textarea {
+            color: var(--quant-text);
+            caret-color: var(--quant-primary);
+        }
+
+        div[data-baseweb="popover"] ul {
+            background: var(--quant-card);
+            border: 1px solid var(--quant-border-soft);
+        }
+
+        div[data-baseweb="popover"] li {
+            color: var(--quant-text);
+        }
+
+        [data-testid="stCheckbox"] label,
+        [data-testid="stRadio"] label {
+            color: var(--quant-muted);
+        }
+
+        [data-testid="stSlider"] [role="slider"] {
+            background: var(--quant-primary);
+            border-color: var(--quant-primary);
+        }
+
+        [data-testid="stDataFrame"],
+        [data-testid="stTable"] {
+            background: var(--quant-card);
+            border: 1px solid var(--quant-border);
+            border-radius: var(--quant-radius);
+            overflow: hidden;
+        }
+
+        [data-testid="stJson"] {
+            background: var(--quant-surface);
+            border: 1px solid var(--quant-border);
+            border-radius: var(--quant-radius);
+            padding: 0.75rem;
+        }
+
+        code, pre {
+            color: var(--quant-primary);
+            font-family: var(--quant-mono);
+        }
+
+        a {
+            color: var(--quant-primary);
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--quant-bg);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--quant-border-soft);
+            border-radius: 999px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--quant-subtle);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+_render_dashboard_theme()
+
+
 def _mode_label(value: str, mapping: dict[str, tuple[str, str]]) -> tuple[str, str]:
     normalized = (value or "").strip().lower()
     return mapping.get(normalized, (value or "Unknown", "secondary"))
@@ -115,14 +343,14 @@ def _render_pipeline_page() -> None:
         runtime_modes.get("energy_source", "unknown"),
         {
             "entsoe": ("ENTSO-E live data", "primary"),
-            "entsoe_partial_synthetic": ("ENTSO-E with synthetic gap fill", "warning"),
+            "entsoe_partial_synthetic": ("ENTSO-E with synthetic fill", "warning"),
             "synthetic": ("Synthetic data fallback", "warning"),
         },
     )
     llm_label, llm_type = _mode_label(
         runtime_modes.get("research_source", "unknown"),
         {
-            "huggingface": ("LLM research analysis active", "primary"),
+            "huggingface": ("LLM analysis active", "primary"),
             "deterministic_fallback": ("Deterministic research fallback active", "warning"),
         },
     )
