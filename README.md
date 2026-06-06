@@ -96,28 +96,74 @@ It runs:
 8. cross-model trading comparison
 9. final research-note generation
 
-## Running It
+## Installation
 
-Create and activate a virtual environment, then install dependencies:
+### Prerequisites
 
-```bash
+- Python 3.10 or newer (3.11 recommended)
+- Git
+- On Linux/macOS, optionally install system build tools: `build-essential`, `libssl-dev`, `python3-dev` (packages vary by distro)
+- On Windows, ensure Visual Studio Build Tools are available for some binary wheels
+
+### Create a virtual environment and install Python dependencies
+
+Windows (PowerShell):
+
+```powershell
 python -m venv .venv
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned -Force
 .venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Set optional secrets in `.env`:
+Unix / macOS:
 
-- `ENTSOE_API_KEY`
-- `HF_TOKEN`
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
 
-Run the full research workflow:
+Notes:
+- If you need GPU-accelerated `torch`, follow official PyTorch install instructions to pick the correct package before or instead of `pip install -r requirements.txt`.
+
+## Environment
+
+This project uses `python-dotenv` and `src/config.py` loads environment variables from a `.env` file at import. To create a local `.env` file from the example:
+
+Unix / macOS:
+
+```bash
+cp .env.example .env
+```
+
+Windows (PowerShell):
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Edit `.env` and set required secrets and configuration. Important variables include (see `src/config.py` for a full list):
+
+- `ENTSOE_API_KEY` (required for real ENTSO-E data)
+- `HF_TOKEN` (optional; required for HuggingFace LLM calls)
+- `ENTSOE_BIDDING_ZONE` (default: `DE_LU`)
+- `SEED` (random seed, default: `42`)
+- `CACHE_ENABLED` (toggle cache behavior)
+
+You can inspect all environment options in `src/config.py`.
+
+## Running It
+
+Run the full research workflow (example):
 
 ```bash
 python -m scripts.run_all --lookback-days 180 --zone DE_LU --model xgboost
 ```
 
-Refetch only the selected historical window while preserving the rest of the cache:
+Refetch only a historical window while preserving the rest of the cache:
 
 ```bash
 python -m scripts.run_all --lookback-days 180 --zone DE_LU --model xgboost --force-refresh
@@ -141,11 +187,34 @@ Run isolated backtesting from an existing scored file:
 python scripts/run_backtest.py --input-path artifacts/models/scored_predictions_xgboost.csv --output-dir artifacts/backtesting
 ```
 
-Run the dashboard:
+Start the Streamlit dashboard:
 
 ```bash
 streamlit run dashboard/app.py
 ```
+
+## Verification / Smoke Tests
+
+Quick checks after installation:
+
+```bash
+# Run the test suite (may be slow in CI; run specific tests as needed)
+pytest -q
+
+# Run a small smoke backtest (adjust paths/args to your local config)
+python scripts/run_backtest.py --input-path artifacts/models/scored_predictions_xgboost.csv --output-dir artifacts/backtesting/smoke
+
+# Start the dashboard and open http://localhost:8501
+streamlit run dashboard/app.py
+```
+
+## Troubleshooting
+
+- Missing env variables: confirm `.env` exists and `src/config.py` loads it (`load_dotenv()` is used).
+- Binary wheel / compilation errors on Windows: install Visual Studio Build Tools and retry, or use prebuilt wheels where available.
+- `torch` / GPU: install the correct `torch` wheel for your CUDA version following the official instructions before installing the rest of `requirements.txt`.
+- If HuggingFace LLM calls time out, increase `HF_TIMEOUT_S` in `.env` or the `AppConfig`.
+
 
 ## Artifact Map
 
