@@ -131,21 +131,23 @@ Notes:
 
 ## Environment
 
-This project uses `python-dotenv` and `src/config.py` loads environment variables from a `.env` file at import. To create a local `.env` file from the example:
+This project uses Streamlit secrets for both local runs and Streamlit Cloud deployments. `src/config.py` reads settings from `st.secrets` when the app is running under Streamlit, and from `.streamlit/secrets.toml` for local CLI runs.
+
+To create a local secrets file from the example:
 
 Unix / macOS:
 
 ```bash
-cp .env.example .env
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
 ```
 
 Windows (PowerShell):
 
 ```powershell
-Copy-Item .env.example .env
+Copy-Item .streamlit\secrets.toml.example .streamlit\secrets.toml
 ```
 
-Edit `.env` and set required secrets and configuration. Important variables include (see `src/config.py` for a full list):
+Edit `.streamlit/secrets.toml` and set required secrets and configuration. Important values include:
 
 - `ENTSOE_API_KEY` (required for real ENTSO-E data)
 - `HF_TOKEN` (optional; required for HuggingFace LLM calls)
@@ -154,7 +156,7 @@ Edit `.env` and set required secrets and configuration. Important variables incl
 - `SEED` (random seed, default: `42`)
 - `CACHE_ENABLED` (toggle cache behavior)
 
-You can inspect all environment options in `src/config.py`.
+The committed template at `.streamlit/secrets.toml.example` includes the full supported configuration surface from `src/config.py`.
 
 ## Running It
 
@@ -194,6 +196,10 @@ Start the Streamlit dashboard:
 streamlit run dashboard/app.py
 ```
 
+### Streamlit Cloud
+
+Deploy `dashboard/app.py` as the main app file. In the Streamlit Cloud app settings, paste the contents of your local `.streamlit/secrets.toml` into the Secrets editor so the hosted app has the same configuration and API access as your local setup.
+
 ## Verification / Smoke Tests
 
 Quick checks after installation:
@@ -211,10 +217,10 @@ streamlit run dashboard/app.py
 
 ## Troubleshooting
 
-- Missing env variables: confirm `.env` exists and `src/config.py` loads it (`load_dotenv()` is used).
+- Missing secrets: confirm `.streamlit/secrets.toml` exists locally, or that Streamlit Cloud Secrets are configured for the deployed app.
 - Binary wheel / compilation errors on Windows: install Visual Studio Build Tools and retry, or use prebuilt wheels where available.
 - `torch` / GPU: install the correct `torch` wheel for your CUDA version following the official instructions before installing the rest of `requirements.txt`.
-- If HuggingFace LLM calls time out, increase `HF_TIMEOUT_S` in `.env` or the `AppConfig`.
+- If HuggingFace LLM calls time out, increase `HF_TIMEOUT_S` in `.streamlit/secrets.toml`.
 
 
 ## Artifact Map

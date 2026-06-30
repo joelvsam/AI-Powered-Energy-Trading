@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -283,13 +282,14 @@ def _energy_mode_from_provenance(summary: dict[str, object]) -> str:
 
 
 def _render_environment_diagnostics() -> None:
+    cfg = AppConfig()
     with st.expander("Environment Diagnostics"):
         st.write(
             {
                 "python_executable": sys.executable,
                 "project_root": str(Path(__file__).parent.parent.resolve()),
-                "entsoe_api_key_loaded": bool(os.getenv("ENTSOE_API_KEY")),
-                "hf_token_loaded": bool(os.getenv("HF_TOKEN")),
+                "entsoe_api_key_loaded": bool(cfg.entsoe_api_key),
+                "hf_token_loaded": bool(cfg.hf_token),
             }
         )
 

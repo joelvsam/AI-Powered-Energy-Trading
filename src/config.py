@@ -3,24 +3,43 @@
 from __future__ import annotations
 
 import logging
-import os
 import random
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
+from typing import Any
+
+import tomllib
 
 import numpy as np
-from dotenv import load_dotenv
 
 try:
     import streamlit as st
 except Exception:  # pragma: no cover - optional dependency
     st = None
 
-load_dotenv()
+
+@lru_cache(maxsize=1)
+def _load_local_secrets() -> dict[str, Any]:
+    """Load local Streamlit secrets for non-Streamlit entrypoints such as CLI scripts."""
+    secrets_path = Path(__file__).resolve().parents[1] / ".streamlit" / "secrets.toml"
+    if not secrets_path.exists():
+        return {}
+
+    with secrets_path.open("rb") as handle:
+        parsed = tomllib.load(handle)
+
+    values: dict[str, Any] = {}
+    for key, value in parsed.items():
+        if key == "general" and isinstance(value, dict):
+            values.update(value)
+        else:
+            values[key] = value
+    return values
 
 
-def _get_setting(name: str, default: str | None = None) -> str | None:
-    """Read a configuration value from Streamlit secrets first, then environment variables."""
+def _get_setting(name: str, default: Any | None = None) -> Any | None:
+    """Read a configuration value from Streamlit secrets or local secrets.toml."""
     if st is not None:
         try:
             secrets = st.secrets
@@ -36,8 +55,10 @@ def _get_setting(name: str, default: str | None = None) -> str | None:
         except Exception:
             pass
 
-    value = os.getenv(name)
-    return value if value is not None else default
+    local_secrets = _load_local_secrets()
+    if name in local_secrets:
+        return local_secrets[name]
+    return default
 
 
 def _get_bool_setting(name: str, default: bool = False) -> bool:
@@ -77,7 +98,7 @@ BIDDING_ZONE_OPENMETEO_COORDS: dict[str, tuple[float, float]] = {
 
 @dataclass(frozen=True)
 class AppConfig:
-    """Application-level configuration loaded from environment variables."""
+    """Application-level configuration loaded from Streamlit secrets."""
 
     project_root: Path = Path(__file__).resolve().parents[1]
     data_raw_dir: Path = project_root / "data" / "raw"

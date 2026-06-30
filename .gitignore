@@ -21,6 +21,8 @@ artifacts/_test_dashboard_review/
 *secret*
 *token*
 *credential*
+.streamlit/secrets.toml
+!.streamlit/secrets.toml.example
 
 # Python cache
 __pycache__/
