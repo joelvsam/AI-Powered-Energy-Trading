@@ -17,6 +17,7 @@ from src.backtesting.comparison import run_model_comparison
 from src.backtesting.strategy_comparison import run_strategy_comparison
 from src.config import AppConfig, ensure_directories, set_global_seed, setup_logging
 from src.data_pipeline.run_pipeline import run_data_pipeline
+from src.experiment_tracking import write_run_manifest
 from src.features.build_features import build_features
 from src.models.model_registry import train_with_model
 from src.simulation.realtime_loop import run_realtime_simulation
@@ -204,22 +205,40 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
     normalized_energy_source = _energy_mode_from_provenance(normalized_provenance)
     normalized_research_grade = bool(normalized_provenance.get("research_grade", False))
 
+    run_config = {
+        "zone": args.zone or cfg.default_zone,
+        "lookback_days": args.lookback_days or cfg.lookback_days,
+        "model": args.model,
+        "skip_model_comparison": skip_model_comparison,
+        "force_refresh": bool(getattr(args, "force_refresh", False)),
+        "rebuild_cache": bool(getattr(args, "rebuild_cache", False)),
+    }
+    runtime_modes = {
+        "energy_source": normalized_energy_source,
+        "research_source": research_note["summary"].get("source", "unknown"),
+        "llm_model": cfg.hf_model,
+        "research_grade": normalized_research_grade,
+    }
+    experiment_tracking = write_run_manifest(
+        cfg,
+        run_config=run_config,
+        runtime_modes=runtime_modes,
+        data_provenance=normalized_provenance,
+        backtest_metrics=dict(backtest_out.metrics),
+        model_comparison_df=model_summary_df,
+        artifact_paths={
+            **strategy_bundle_paths,
+            "research_note_path": research_note["note_path"],
+            "anomaly_review_path": anomaly_review["path"],
+            "scored_path": str(train_out.scored_path),
+            "diagnostics_path": str(train_out.diagnostics_path),
+        },
+    )
+
     logging.info("Research workflow complete. Note: %s", research_note["note_path"])
     return {
-        "config": {
-            "zone": args.zone or cfg.default_zone,
-            "lookback_days": args.lookback_days or cfg.lookback_days,
-            "model": args.model,
-            "skip_model_comparison": skip_model_comparison,
-            "force_refresh": bool(getattr(args, "force_refresh", False)),
-            "rebuild_cache": bool(getattr(args, "rebuild_cache", False)),
-        },
-        "runtime_modes": {
-            "energy_source": normalized_energy_source,
-            "research_source": research_note["summary"].get("source", "unknown"),
-            "llm_model": cfg.hf_model,
-            "research_grade": normalized_research_grade,
-        },
+        "config": run_config,
+        "runtime_modes": runtime_modes,
         "data_provenance": normalized_provenance,
         "cache_summary": pipeline_out.cache_summary,
         "features_df": features,
@@ -237,6 +256,7 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
         "sim_path": sim_path,
         "anomaly_review": anomaly_review,
         "research_summary": research_note,
+        "experiment_tracking": experiment_tracking,
         "research_artifacts": {
             **strategy_bundle_paths,
             "research_summary_json_path": research_note["json_path"],
@@ -244,6 +264,8 @@ def run_workflow(args: argparse.Namespace) -> dict[str, Any]:
             "anomaly_review_path": anomaly_review["path"],
             "model_comparison_summary_path": model_comparison_result.summary_csv_path if model_comparison_result else "",
             "model_comparison_metadata_path": model_comparison_result.summary_json_path if model_comparison_result else "",
+            "run_manifest_path": experiment_tracking["manifest_path"],
+            "runs_index_path": experiment_tracking["runs_index_path"],
         },
     }
 

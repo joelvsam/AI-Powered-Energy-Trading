@@ -13,6 +13,7 @@ from sklearn.preprocessing import StandardScaler
 from src.config import AppConfig
 from src.models.base import TrainingOutputs, model_feature_columns
 from src.models.diagnostics import build_common_error_analysis, lstm_feature_ablation, write_model_diagnostics
+from src.models.feature_selection import first_train_window_rows, select_model_features
 from src.models.walk_forward import iter_walk_forward_windows
 
 try:
@@ -29,7 +30,7 @@ _LSTM_BASE = nn.Module if nn is not None else object
 class LSTMRegressor(_LSTM_BASE):
     """Simple LSTM regressor for one-step forecasting."""
 
-    def __init__(self, input_dim: int, hidden_dim: int = 32) -> None:
+    def __init__(self, input_dim: int, hidden_dim: int = 32, dropout: float = 0.15) -> None:
         super().__init__()
         if nn is None:
             raise RuntimeError("PyTorch is required for LSTM model. Please install torch.")
@@ -37,6 +38,7 @@ class LSTMRegressor(_LSTM_BASE):
         self.head = nn.Sequential(
             nn.Linear(hidden_dim, 16),
             nn.ReLU(),
+            nn.Dropout(p=dropout),
             nn.Linear(16, 1),
         )
 
@@ -58,16 +60,78 @@ def _to_tensors(X_2d: np.ndarray, y_1d: np.ndarray) -> tuple[torch.Tensor, torch
     return x_tensor, y_tensor
 
 
-def _train_model(model: LSTMRegressor, x_train: torch.Tensor, y_train: torch.Tensor, epochs: int = 10) -> None:
+MIN_VALIDATION_ROWS = 8
+MIN_FIT_ROWS = 16
+
+
+def _train_model(
+    model: LSTMRegressor,
+    x_train: torch.Tensor,
+    y_train: torch.Tensor,
+    *,
+    max_epochs: int = 60,
+    patience: int = 6,
+    validation_fraction: float = 0.15,
+) -> dict[str, object]:
+    """Train with a chronological validation tail, early stopping, and best-weight restore.
+
+    Falls back to fixed-epoch training when the sample is too small to carve
+    out a meaningful validation tail.
+    """
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    model.train()
-    for _ in range(epochs):
+
+    total_rows = x_train.shape[0]
+    validation_rows = max(int(total_rows * validation_fraction), MIN_VALIDATION_ROWS)
+    has_validation = total_rows - validation_rows >= MIN_FIT_ROWS
+    if has_validation:
+        x_fit, y_fit = x_train[: total_rows - validation_rows], y_train[: total_rows - validation_rows]
+        x_val, y_val = x_train[total_rows - validation_rows :], y_train[total_rows - validation_rows :]
+    else:
+        x_fit, y_fit = x_train, y_train
+        x_val, y_val = None, None
+        max_epochs = min(max_epochs, 10)
+
+    best_val_loss = float("inf")
+    best_state = None
+    epochs_without_improvement = 0
+    epochs_run = 0
+    early_stopped = False
+
+    for _ in range(max_epochs):
+        model.train()
         optimizer.zero_grad()
-        pred = model(x_train)
-        loss = criterion(pred, y_train)
+        pred = model(x_fit)
+        loss = criterion(pred, y_fit)
         loss.backward()
         optimizer.step()
+        epochs_run += 1
+
+        if x_val is None:
+            continue
+        model.eval()
+        with torch.no_grad():
+            val_loss = float(criterion(model(x_val), y_val).item())
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= patience:
+                early_stopped = True
+                break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    model.eval()
+    return {
+        "epochs_run": epochs_run,
+        "max_epochs": max_epochs,
+        "early_stopped": early_stopped,
+        "best_val_loss": best_val_loss if best_val_loss != float("inf") else None,
+        "validation_rows": validation_rows if has_validation else 0,
+    }
 
 
 def _fit_target(
@@ -78,7 +142,9 @@ def _fit_target(
     seed: int,
     train_window_days: int,
     test_window_days: int,
-) -> tuple[LSTMRegressor, StandardScaler, pd.Series, dict[str, float]]:
+    max_epochs: int = 60,
+    patience: int = 6,
+) -> tuple[LSTMRegressor, StandardScaler, pd.Series, dict[str, object]]:
     walk_df = pd.DataFrame({"timestamp_utc": timestamps}).reset_index(drop=True)
     windows = iter_walk_forward_windows(
         walk_df,
@@ -88,6 +154,7 @@ def _fit_target(
     predictions = pd.Series(np.nan, index=X.index, dtype=float)
     actuals: list[float] = []
     preds: list[float] = []
+    fold_histories: list[dict[str, object]] = []
 
     for window in windows:
         scaler = StandardScaler()
@@ -98,7 +165,7 @@ def _fit_target(
         model = _build_model(input_dim=X.shape[1], seed=seed)
         x_train, y_train = _to_tensors(X_train, y.iloc[train_slice].values)
         x_test, y_test = _to_tensors(X_test, y.iloc[test_slice].values)
-        _train_model(model, x_train, y_train, epochs=8)
+        fold_histories.append(_train_model(model, x_train, y_train, max_epochs=max_epochs, patience=patience))
         model.eval()
         with torch.no_grad():
             fold_pred = model(x_test).view(-1).cpu().numpy()
@@ -111,11 +178,16 @@ def _fit_target(
     X_scaled_full = final_scaler.fit_transform(X)
     final_model = _build_model(input_dim=X.shape[1], seed=seed)
     final_x, final_y = _to_tensors(X_scaled_full, y.values)
-    _train_model(final_model, final_x, final_y, epochs=10)
+    final_history = _train_model(final_model, final_x, final_y, max_epochs=max_epochs, patience=patience)
 
     metrics = {
         "mae": float(mean_absolute_error(actuals, preds)),
         "rmse": float(np.sqrt(mean_squared_error(actuals, preds))),
+        "training": {
+            "mean_fold_epochs": float(np.mean([history["epochs_run"] for history in fold_histories])),
+            "fold_early_stop_rate": float(np.mean([bool(history["early_stopped"]) for history in fold_histories])),
+            "final_model": final_history,
+        },
     }
     return final_model, final_scaler, predictions, metrics
 
@@ -123,6 +195,15 @@ def _fit_target(
 def train_lstm_models(features_df: pd.DataFrame, cfg: AppConfig) -> TrainingOutputs:
     df = features_df.copy().sort_values("timestamp_utc").reset_index(drop=True)
     feature_cols = model_feature_columns(df)
+    feature_selection = None
+    if cfg.enable_feature_pruning:
+        feature_selection = select_model_features(
+            df,
+            feature_cols,
+            fit_rows=first_train_window_rows(len(df), cfg.walk_forward_train_window_days, cfg.walk_forward_test_window_days),
+            correlation_threshold=cfg.feature_correlation_threshold,
+        )
+        feature_cols = feature_selection.kept
     X = df[feature_cols]
     timestamps = df["timestamp_utc"]
 
@@ -133,6 +214,8 @@ def train_lstm_models(features_df: pd.DataFrame, cfg: AppConfig) -> TrainingOutp
         seed=cfg.random_seed,
         train_window_days=cfg.walk_forward_train_window_days,
         test_window_days=cfg.walk_forward_test_window_days,
+        max_epochs=cfg.lstm_max_epochs,
+        patience=cfg.lstm_early_stopping_patience,
     )
     renewable_model, renewable_scaler, renewable_pred, renewable_metrics = _fit_target(
         X,
@@ -141,6 +224,8 @@ def train_lstm_models(features_df: pd.DataFrame, cfg: AppConfig) -> TrainingOutp
         seed=cfg.random_seed,
         train_window_days=cfg.walk_forward_train_window_days,
         test_window_days=cfg.walk_forward_test_window_days,
+        max_epochs=cfg.lstm_max_epochs,
+        patience=cfg.lstm_early_stopping_patience,
     )
     price_model, price_scaler, price_pred, price_metrics = _fit_target(
         X,
@@ -149,6 +234,8 @@ def train_lstm_models(features_df: pd.DataFrame, cfg: AppConfig) -> TrainingOutp
         seed=cfg.random_seed,
         train_window_days=cfg.walk_forward_train_window_days,
         test_window_days=cfg.walk_forward_test_window_days,
+        max_epochs=cfg.lstm_max_epochs,
+        patience=cfg.lstm_early_stopping_patience,
     )
 
     df["pred_demand_kw"] = demand_pred
@@ -178,6 +265,12 @@ def train_lstm_models(features_df: pd.DataFrame, cfg: AppConfig) -> TrainingOutp
         "demand_feature_ablation": lstm_feature_ablation(demand_model, demand_scaler, X, feature_cols),
         "renewable_feature_ablation": lstm_feature_ablation(renewable_model, renewable_scaler, X, feature_cols),
         "error_analysis": build_common_error_analysis(df),
+        "feature_selection": feature_selection.summary() if feature_selection else {"enabled": False},
+        "training_history": {
+            "price": price_metrics.get("training", {}),
+            "demand": demand_metrics.get("training", {}),
+            "renewable": renewable_metrics.get("training", {}),
+        },
     }
     write_model_diagnostics(diagnostics_payload, diagnostics_path)
 

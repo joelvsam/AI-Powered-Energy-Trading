@@ -171,6 +171,12 @@ class AppConfig:
     walk_forward_train_window_days: int = _get_int_setting("WALK_FORWARD_TRAIN_WINDOW_DAYS", 90)
     walk_forward_test_window_days: int = _get_int_setting("WALK_FORWARD_TEST_WINDOW_DAYS", 7)
     llm_optional_mode: bool = _get_bool_setting("LLM_OPTIONAL_MODE", True)
+    enable_feature_pruning: bool = _get_bool_setting("ENABLE_FEATURE_PRUNING", True)
+    feature_correlation_threshold: float = _get_float_setting("FEATURE_CORRELATION_THRESHOLD", 0.95)
+    enable_hyperparameter_search: bool = _get_bool_setting("ENABLE_HYPERPARAMETER_SEARCH", True)
+    hyperparameter_validation_fraction: float = _get_float_setting("HYPERPARAMETER_VALIDATION_FRACTION", 0.2)
+    lstm_max_epochs: int = _get_int_setting("LSTM_MAX_EPOCHS", 60)
+    lstm_early_stopping_patience: int = _get_int_setting("LSTM_EARLY_STOPPING_PATIENCE", 6)
 
 
 def ensure_directories(cfg: AppConfig) -> None:

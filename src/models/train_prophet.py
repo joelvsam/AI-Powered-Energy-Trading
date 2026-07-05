@@ -12,6 +12,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from src.config import AppConfig
 from src.models.base import TrainingOutputs, model_feature_columns
 from src.models.diagnostics import build_common_error_analysis, prophet_regressor_effects, write_model_diagnostics
+from src.models.feature_selection import first_train_window_rows, select_model_features
 from src.models.walk_forward import iter_walk_forward_windows
 
 try:
@@ -82,6 +83,15 @@ def _fit_target(
 def train_prophet_models(features_df: pd.DataFrame, cfg: AppConfig) -> TrainingOutputs:
     df = features_df.copy().sort_values("timestamp_utc").reset_index(drop=True)
     regressor_cols = model_feature_columns(df)
+    feature_selection = None
+    if cfg.enable_feature_pruning:
+        feature_selection = select_model_features(
+            df,
+            regressor_cols,
+            fit_rows=first_train_window_rows(len(df), cfg.walk_forward_train_window_days, cfg.walk_forward_test_window_days),
+            correlation_threshold=cfg.feature_correlation_threshold,
+        )
+        regressor_cols = feature_selection.kept
 
     demand_model, demand_pred, demand_metrics = _fit_target(
         df,
@@ -126,6 +136,7 @@ def train_prophet_models(features_df: pd.DataFrame, cfg: AppConfig) -> TrainingO
         "demand_regressor_effects": prophet_regressor_effects(demand_model, regressor_cols),
         "renewable_regressor_effects": prophet_regressor_effects(renewable_model, regressor_cols),
         "error_analysis": build_common_error_analysis(df),
+        "feature_selection": feature_selection.summary() if feature_selection else {"enabled": False},
     }
     write_model_diagnostics(diagnostics_payload, diagnostics_path)
 
