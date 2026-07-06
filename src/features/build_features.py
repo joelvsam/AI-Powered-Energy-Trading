@@ -175,9 +175,11 @@ def build_features(df: pd.DataFrame, cfg: AppConfig) -> pd.DataFrame:
     )
     out["realized_volatility_24"] = out["price_eur_mwh"].diff().rolling(24, min_periods=12).std()
     out["spread_volatility_24"] = out["intraday_day_ahead_spread_eur_mwh"].rolling(24, min_periods=12).std()
+    # ffill only: a NaN threshold during warmup compares False (regime 0)
+    # instead of borrowing a future quantile via bfill.
     out["high_vol_regime"] = (
         out["realized_volatility_24"]
-        > out["realized_volatility_24"].rolling(24 * 7, min_periods=24).quantile(0.7).bfill().ffill()
+        > out["realized_volatility_24"].rolling(24 * 7, min_periods=24).quantile(0.7).ffill()
     ).astype(int)
     out["intraday_stress_proxy"] = (
         out["intraday_day_ahead_spread_eur_mwh"].abs()
@@ -203,7 +205,10 @@ def build_features(df: pd.DataFrame, cfg: AppConfig) -> pd.DataFrame:
 
     numeric_cols = [col for col in out.select_dtypes(include=[np.number]).columns if col not in NON_MODEL_PROVENANCE_COLUMNS]
     out[numeric_cols] = out[numeric_cols].replace([np.inf, -np.inf], np.nan)
-    out[numeric_cols] = out[numeric_cols].ffill().bfill()
+    # ffill only — no bfill: backward-filling lag/rolling warmup rows would leak
+    # future values into the earliest training rows. The dropna below removes
+    # the warmup rows instead of fabricating them.
+    out[numeric_cols] = out[numeric_cols].ffill()
 
     all_nan_columns = [col for col in out.columns if out[col].isna().all()]
     if all_nan_columns:

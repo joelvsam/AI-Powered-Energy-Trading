@@ -176,7 +176,10 @@ class BacktestEngineTests(unittest.TestCase):
         )
 
         self.assertTrue((result_df["recommended_decision"] == "SHORT").all())
-        self.assertTrue((result_df["target_position"] < 0.0).all())
+        # Row 0 has no causal volatility estimate yet, so it stays flat rather
+        # than borrowing future volatility; it must still never flip long.
+        self.assertTrue((result_df["target_position"] <= 0.0).all())
+        self.assertTrue((result_df["target_position"].iloc[1:] < 0.0).all())
         self.assertFalse((result_df["recommended_decision"] == "LONG").any())
 
     def test_price_led_recommendation_holds_inside_price_edge_band(self) -> None:

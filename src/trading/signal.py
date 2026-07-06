@@ -77,20 +77,20 @@ def compute_signal_frame(df: pd.DataFrame, config: SignalConfig) -> pd.DataFrame
     out["intraday_day_ahead_spread_eur_mwh"] = out["intraday_price_eur_mwh"] - out["day_ahead_price_eur_mwh"]
     out["price_trend"] = pd.to_numeric(out["price_eur_mwh"], errors="coerce").diff().fillna(0.0)
 
+    # Warmup NaNs are filled with expanding (past-only) statistics, never bfill:
+    # backward fills would leak future prices into earlier signal rows.
+    clean_price = pd.to_numeric(out["price_eur_mwh"], errors="coerce")
     rolling_volatility = (
-        pd.to_numeric(out["price_eur_mwh"], errors="coerce")
-        .rolling(config.volatility_window_hours, min_periods=max(2, config.volatility_window_hours // 2))
+        clean_price.rolling(config.volatility_window_hours, min_periods=max(2, config.volatility_window_hours // 2))
         .std()
-        .bfill()
         .ffill()
-        .fillna(0.0)
+        .fillna(clean_price.expanding(min_periods=2).std())
     )
     equilibrium_price = (
-        pd.to_numeric(out["price_eur_mwh"], errors="coerce")
-        .rolling(config.equilibrium_window_hours, min_periods=max(6, config.equilibrium_window_hours // 3))
+        clean_price.rolling(config.equilibrium_window_hours, min_periods=max(6, config.equilibrium_window_hours // 3))
         .median()
-        .bfill()
         .ffill()
+        .fillna(clean_price.expanding(min_periods=1).median())
     )
     out["rolling_volatility"] = rolling_volatility
     out["equilibrium_price_eur_mwh"] = equilibrium_price
@@ -98,20 +98,31 @@ def compute_signal_frame(df: pd.DataFrame, config: SignalConfig) -> pd.DataFrame
     out["mean_reversion_signal"] = -1.0 * (
         (pd.to_numeric(out["price_eur_mwh"], errors="coerce") - equilibrium_price) / (rolling_volatility + 1e-6)
     )
-    out["fundamental_signal"] = (
-        (out["imbalance_pred"] - out["net_load_mw"].rolling(config.equilibrium_window_hours, min_periods=6).mean().bfill().ffill())
-        / max(config.imbalance_scale, 1e-6)
+    net_load_equilibrium = (
+        out["net_load_mw"]
+        .rolling(config.equilibrium_window_hours, min_periods=6)
+        .mean()
+        .ffill()
+        .fillna(out["net_load_mw"].expanding(min_periods=1).mean())
     )
-    out["spread_signal"] = (
+    out["fundamental_signal"] = (out["imbalance_pred"] - net_load_equilibrium) / max(config.imbalance_scale, 1e-6)
+    spread_volatility = (
         out["intraday_day_ahead_spread_eur_mwh"]
-        / (out["intraday_day_ahead_spread_eur_mwh"].rolling(config.volatility_window_hours, min_periods=4).std().bfill().ffill() + 1e-6)
+        .rolling(config.volatility_window_hours, min_periods=4)
+        .std()
+        .ffill()
+        .fillna(out["intraday_day_ahead_spread_eur_mwh"].expanding(min_periods=2).std())
     )
-    out["vol_regime"] = np.where(
+    out["spread_signal"] = out["intraday_day_ahead_spread_eur_mwh"] / (spread_volatility + 1e-6)
+    # A NaN threshold during warmup compares False, defaulting to the
+    # conservative low_vol regime instead of borrowing a future quantile.
+    high_vol_threshold = (
         rolling_volatility
-        > rolling_volatility.rolling(config.equilibrium_window_hours, min_periods=6).quantile(config.high_vol_regime_quantile).bfill().ffill(),
-        "high_vol",
-        "low_vol",
+        .rolling(config.equilibrium_window_hours, min_periods=6)
+        .quantile(config.high_vol_regime_quantile)
+        .ffill()
     )
+    out["vol_regime"] = np.where(rolling_volatility > high_vol_threshold, "high_vol", "low_vol")
     out["market_regime"] = np.where(
         out["price_trend"].rolling(config.volatility_window_hours, min_periods=4).mean().abs()
         > rolling_volatility.rolling(config.volatility_window_hours, min_periods=4).mean().fillna(0.0) * 0.3,

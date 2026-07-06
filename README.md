@@ -13,6 +13,10 @@ The pipeline answers that question by combining:
 - realistic backtesting with spread, slippage, execution delay, position caps, and liquidity limits
 - mandatory baseline comparisons and bootstrap significance tests
 - model diagnostics tied to trading performance
+- leakage-safe feature pruning (near-constant and high-correlation drops fit on the first train window only)
+- chronologically honest hyperparameter search validated on the tail of the first train window
+- LSTM early stopping with a causal validation split and best-weight restore
+- experiment tracking: per-run JSON manifests plus an append-only `runs_index.csv`
 - optional LLM-assisted anomaly review and research summarization with deterministic fallbacks
 
 ## Research Thesis
@@ -100,7 +104,7 @@ It runs:
 
 ### Prerequisites
 
-- Python 3.10 or newer (3.11 recommended)
+- Python 3.11 or newer (3.14 recommended — matches CI and the pinned wheels in `requirements.txt`)
 - Git
 - On Linux/macOS, optionally install system build tools: `build-essential`, `libssl-dev`, `python3-dev` (packages vary by distro)
 - On Windows, ensure Visual Studio Build Tools are available for some binary wheels
@@ -127,6 +131,7 @@ pip install -r requirements.txt
 ```
 
 Notes:
+- Dependencies are pinned to exact versions in `requirements.txt` for reproducibility. To run the test suite, install the dev toolchain instead: `pip install -r requirements-dev.txt`.
 - If you need GPU-accelerated `torch`, follow official PyTorch install instructions to pick the correct package before or instead of `pip install -r requirements.txt`.
 
 ## Environment
@@ -205,8 +210,9 @@ Deploy `dashboard/app.py` as the main app file. In the Streamlit Cloud app setti
 Quick checks after installation:
 
 ```bash
-# Run the test suite (may be slow in CI; run specific tests as needed)
-pytest -q
+# Install the test toolchain and run the full suite
+pip install -r requirements-dev.txt
+python -m pytest tests -q
 
 # Run a small smoke backtest (adjust paths/args to your local config)
 python scripts/run_backtest.py --input-path artifacts/models/scored_predictions_xgboost.csv --output-dir artifacts/backtesting/smoke
@@ -243,6 +249,11 @@ Important outputs include:
 - `artifacts/research/selected_strategy_significance_<model>.csv`
 - `artifacts/research/model_comparison/model_comparison_summary.csv`
 - `artifacts/research/model_comparison/model_comparison_summary.json`
+
+Experiment-tracking outputs (one manifest per workflow run, plus a cross-run index):
+
+- `artifacts/research/runs/run_<id>.json` — config snapshot (secrets redacted), git revision, package versions, provenance, headline metrics
+- `artifacts/research/runs_index.csv` — one summary row per run for comparing sweeps
 
 Model-level artifacts remain under `artifacts/models/`:
 
@@ -284,10 +295,13 @@ The implementation explicitly avoids common failure modes:
 - no direct cache overwrite without validation and atomic replace
 - walk-forward scoring instead of in-sample evaluation
 - no same-bar execution lookahead
+- no backward-fill of rolling statistics: warmup rows are dropped (features) or filled with expanding past-only statistics (signals), never with future values; enforced by causality regression tests in `tests/test_no_lookahead.py`
 - no fake performance inflation
 - no reliance on a cosmetic LLM report
 - no test-set tuning of signal parameters
 - no hidden synthetic contamination in research outputs
+
+One disclosed exception: raw-data gap repair in `src/data_pipeline/clean.py` uses bounded two-sided interpolation (time interpolation up to 6h, ffill/bfill up to 3h). Every filled row is provenance-marked `partially_synthetic`, so this is visible in research outputs rather than silent.
 
 ## Important Caveat
 
@@ -313,22 +327,28 @@ src/
   features/
   models/
     diagnostics.py
+    feature_selection.py
+    tuning.py
   simulation/
   trading/
+  experiment_tracking.py
 scripts/
   run_all.py
   run_backtest.py
   run_model_comparison.py
 dashboard/
   app.py
+.github/
+  workflows/
+    tests.yml
 ```
 
 ## Verification
 
-Current regression coverage includes:
+The full regression suite covers the backtest engine, comparison flow, dashboard review helpers, signal construction, bootstrap statistics, walk-forward splitting, feature engineering, feature pruning, hyperparameter tuning, experiment tracking, and lookahead/causality guarantees:
 
 ```bash
-python -m unittest tests.test_backtesting tests.test_dashboard_backtesting_review
+python -m pytest tests -q
 ```
 
-This ensures the upgraded engine, comparison flow, and dashboard review helpers remain functional while the repository evolves into a research-first trading system.
+CI (`.github/workflows/tests.yml`) runs the same compile check and test suite on every push and pull request to `main`.

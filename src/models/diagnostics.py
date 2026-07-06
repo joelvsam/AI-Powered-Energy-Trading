@@ -29,7 +29,7 @@ def _hourly_error_breakdown(scored_df: pd.DataFrame) -> list[dict[str, Any]]:
 
 def _volatility_error_breakdown(scored_df: pd.DataFrame) -> list[dict[str, Any]]:
     df = scored_df.copy()
-    realized_vol = pd.to_numeric(df["price_eur_mwh"], errors="coerce").diff().rolling(24, min_periods=6).std().bfill().ffill()
+    realized_vol = pd.to_numeric(df["price_eur_mwh"], errors="coerce").diff().rolling(24, min_periods=6).std().ffill()
     threshold = float(realized_vol.quantile(0.7)) if len(realized_vol.dropna()) else 0.0
     df["vol_regime"] = np.where(realized_vol > threshold, "high_vol", "low_vol")
     df["abs_price_error"] = (
