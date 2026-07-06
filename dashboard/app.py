@@ -284,59 +284,203 @@ def _energy_mode_from_provenance(summary: dict[str, object]) -> str:
 def _render_environment_diagnostics() -> None:
     cfg = AppConfig()
     with st.expander("Environment Diagnostics"):
-        st.write(
-            {
-                "python_executable": sys.executable,
-                "project_root": str(Path(__file__).parent.parent.resolve()),
-                "entsoe_api_key_loaded": bool(cfg.entsoe_api_key),
-                "hf_token_loaded": bool(cfg.hf_token),
-            }
+        key_col, token_col = st.columns(2)
+        key_col.markdown(f"**ENTSO-E API key:** {'loaded' if cfg.entsoe_api_key else 'not found'}")
+        token_col.markdown(f"**Hugging Face token:** {'loaded' if cfg.hf_token else 'not found'}")
+        st.caption(f"Python: `{sys.executable}`")
+        st.caption(f"Project root: `{Path(__file__).parent.parent.resolve()}`")
+
+
+MODEL_DISPLAY_NAMES = {"xgboost": "XGBoost", "lstm": "LSTM", "prophet": "Prophet"}
+
+
+def _render_pipeline_sidebar() -> tuple[argparse.Namespace, bool]:
+    """Render run-configuration controls in the sidebar and return (args, run_clicked)."""
+    st.sidebar.subheader("Run Configuration")
+    region = st.sidebar.selectbox("Region", options=["DE_LU", "FR", "NL"], index=0)
+    cfg = AppConfig()
+    weather_lat, weather_lon = cfg.openmeteo_coords_for_zone(region)
+    st.sidebar.caption(f"Open-Meteo coordinates: {weather_lat:.4f}, {weather_lon:.4f}")
+    lookback_days = st.sidebar.selectbox("Training Window (days)", options=[90, 180, 365], index=1)
+    model = st.sidebar.selectbox("Model", options=["xgboost", "lstm", "prophet"], index=0)
+    horizon = st.sidebar.slider("Simulation Horizon", min_value=12, max_value=168, value=24, step=12)
+    skip_model_comparison = st.sidebar.checkbox("Skip full model comparison", value=False, help="Run only the selected model workflow and skip the cross-model comparison pass.")
+    force_refresh = st.sidebar.checkbox("Force refresh raw-data window", value=False, help="Refetch the selected history window even if cache rows already exist.")
+    rebuild_cache = st.sidebar.checkbox("Rebuild cache for selected run", value=False, help="Ignore the existing raw-data cache for this run and rebuild it from fetched data plus explicit gap filling.")
+    run_clicked = st.sidebar.button("Run Pipeline", type="primary", width="stretch")
+    args = argparse.Namespace(
+        zone=region,
+        lookback_days=lookback_days,
+        simulation_horizon=horizon,
+        model=model,
+        skip_model_comparison=skip_model_comparison,
+        force_refresh=force_refresh,
+        rebuild_cache=rebuild_cache,
+    )
+    return args, run_clicked
+
+
+def _render_instructions(*, expanded: bool) -> None:
+    """Instructions and disclaimers; collapsed automatically once a run has completed."""
+    with st.expander("How to use this dashboard", expanded=expanded):
+        st.markdown(
+            """
+**Getting started**
+
+1. Choose a region, training window, and model in the **sidebar** on the left.
+2. Optional toggles: *Skip full model comparison*, *Force refresh raw-data window*, and *Rebuild cache*.
+3. Click **Run Pipeline** in the sidebar and keep this tab open while it works.
+4. When the run finishes, model metrics, the latest trading signal, charts, and the research summary appear on this page.
+            """
+        )
+        st.warning(
+            "A full pipeline run can take several minutes: it fetches market and weather history, "
+            "trains models with walk-forward validation, backtests the strategy, and compares baselines. "
+            "Please be patient while it completes.",
+            icon="⚠️",
+        )
+        st.info(
+            "For faster results, pick a **90-day** training window and tick **Skip full model comparison** in the sidebar.",
+        )
+        st.info(
+            "External services can be temperamental: ENTSO-E or Hugging Face API keys may occasionally be "
+            "rejected, rate-limited, or time out. When that happens the pipeline falls back to synthetic data "
+            "or deterministic analysis and clearly flags it in the run output.",
+        )
+        st.error(
+            "**Not financial advice.** This dashboard produces model-driven research forecasts, and forecasts "
+            "can be wrong, sometimes badly. If you factor these outputs into any trading or investment "
+            "decision, do so only after careful independent judgment, a hard look at the risks, and "
+            "professional advice where appropriate.",
+            icon="⚠️",
+        )
+
+
+def _render_empty_state() -> None:
+    st.markdown(
+        """
+        <div style="border:1px solid var(--quant-border); border-radius:8px; background:var(--quant-card);
+                    padding:2.5rem; text-align:center; margin-top:1rem;">
+            <div style="font-size:1.15rem; font-weight:700;">No research run yet</div>
+            <div style="color:var(--quant-muted); margin-top:0.5rem; max-width:520px; margin-left:auto; margin-right:auto;">
+                Set the region, training window, and model in the sidebar, then click
+                <strong>Run Pipeline</strong>. Model metrics, trading signals, charts, and the
+                research note will appear here when the run completes.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_research_summary(result: dict) -> None:
+    research = result.get("research_summary", {})
+    summary = dict(research.get("summary", {}))
+    if not summary:
+        return
+
+    st.subheader("Research Summary")
+    research_grade = bool(summary.get("energy_source_research_grade", False))
+    llm_generated = str(summary.get("source", "")).strip().lower() == "huggingface"
+    badge_col1, badge_col2 = st.columns(2)
+    with badge_col1:
+        if research_grade:
+            st.success("Research-grade data: no synthetic contamination in this run.")
+        else:
+            st.warning("This run contains synthetic or partially synthetic data. Interpret with caution.", icon="⚠️")
+    with badge_col2:
+        if llm_generated:
+            st.info("Summary produced by the LLM research analyst.")
+        else:
+            st.info("Summary produced by the deterministic research fallback.")
+
+    edge_summary = str(summary.get("edge_summary", "")).strip()
+    if edge_summary:
+        st.markdown(f"**Edge thesis.** {edge_summary}")
+
+    trading_conclusion = str(summary.get("trading_conclusion", "")).strip()
+    if trading_conclusion:
+        st.info(f"**Trading conclusion:** {trading_conclusion}")
+
+    strengths = [str(item) for item in summary.get("strengths", [])]
+    weaknesses = [str(item) for item in summary.get("weaknesses", [])]
+    failure_modes = [str(item) for item in summary.get("failure_modes", [])]
+    strengths_col, weaknesses_col = st.columns(2)
+    with strengths_col:
+        st.markdown("**Strengths**")
+        for item in strengths or ["No strengths recorded."]:
+            st.markdown(f"- {item}")
+    with weaknesses_col:
+        st.markdown("**Weaknesses & Failure Modes**")
+        for item in (weaknesses + failure_modes) or ["No weaknesses recorded."]:
+            st.markdown(f"- {item}")
+
+    next_experiments = [str(item) for item in summary.get("next_experiments", [])]
+    if next_experiments:
+        st.markdown("**Suggested next experiments**")
+        for item in next_experiments:
+            st.markdown(f"- {item}")
+
+    note_path = Path(str(research.get("note_path", "")))
+    json_path = Path(str(research.get("json_path", "")))
+    download_col1, download_col2 = st.columns(2)
+    if note_path.is_file():
+        download_col1.download_button(
+            "Download research note (Markdown)",
+            note_path.read_text(encoding="utf-8"),
+            file_name="research_note.md",
+            mime="text/markdown",
+            width="stretch",
+        )
+    if json_path.is_file():
+        download_col2.download_button(
+            "Download research summary (JSON)",
+            json_path.read_text(encoding="utf-8"),
+            file_name="research_summary.json",
+            mime="application/json",
+            width="stretch",
         )
 
 
 def _render_pipeline_page() -> None:
+    args, run_clicked = _render_pipeline_sidebar()
+
     st.title("Energy Trading Dashboard")
-    st.caption("Choose region, training window, and model; then run the full volatility-aware trading pipeline.")
+    st.caption("Configure the run in the sidebar, then launch the full volatility-aware trading pipeline.")
     _render_environment_diagnostics()
 
-    region = st.selectbox("Region", options=["DE_LU", "FR", "NL"], index=0)
-    cfg = AppConfig()
-    weather_lat, weather_lon = cfg.openmeteo_coords_for_zone(region)
-    st.caption(f"Open-Meteo coordinates for selected region: {weather_lat:.4f}, {weather_lon:.4f}")
-    lookback_days = st.selectbox("Training Window (days)", options=[90, 180, 365], index=1)
-    model = st.selectbox("Model", options=["xgboost", "lstm", "prophet"], index=0)
-    horizon = st.slider("Simulation Horizon", min_value=12, max_value=168, value=24, step=12)
-    skip_model_comparison = st.checkbox("Skip full model comparison", value=False, help="Run only the selected model workflow and skip the cross-model comparison pass.")
-    force_refresh = st.checkbox("Force refresh raw-data window", value=False, help="Refetch the selected history window even if cache rows already exist.")
-    rebuild_cache = st.checkbox("Rebuild cache for selected run", value=False, help="Ignore the existing raw-data cache for this run and rebuild it from fetched data plus explicit gap filling.")
-
     result = st.session_state.get("pipeline_result")
-    if st.button("Run Pipeline", type="primary"):
-        args = argparse.Namespace(
-            zone=region,
-            lookback_days=lookback_days,
-            simulation_horizon=horizon,
-            model=model,
-            skip_model_comparison=skip_model_comparison,
-            force_refresh=force_refresh,
-            rebuild_cache=rebuild_cache,
+    if run_clicked:
+        spinner_text = (
+            f"Running the {MODEL_DISPLAY_NAMES.get(args.model, args.model)} pipeline for {args.zone} "
+            f"({args.lookback_days}-day window)... this may take several minutes."
         )
-        with st.spinner("Running pipeline... this may take a while."):
+        with st.spinner(spinner_text):
             result = run_workflow(args)
         st.session_state["pipeline_result"] = result
+        st.session_state["pipeline_completed_at"] = pd.Timestamp.now(tz="UTC")
+        st.toast("Pipeline completed")
+
+    _render_instructions(expanded=result is None)
 
     if not result:
-        st.info("Run the pipeline to see model metrics, signals, and charts.")
+        _render_empty_state()
         return
 
     st.success("Pipeline completed")
-    st.write(
-        {
-            "selected_region": result["config"]["zone"],
-            "selected_training_window_days": result["config"]["lookback_days"],
-            "selected_model": result["config"]["model"],
-        }
+    completed_at = st.session_state.get("pipeline_completed_at")
+    if completed_at is not None:
+        st.caption(f"Last run completed at {completed_at:%Y-%m-%d %H:%M} UTC")
+    run_config = result["config"]
+    model_key = str(run_config.get("model", "unknown"))
+    summary_sentence = (
+        f"This run trained the **{MODEL_DISPLAY_NAMES.get(model_key, model_key)}** model for the "
+        f"**{run_config.get('zone', 'unknown')}** region using a "
+        f"**{run_config.get('lookback_days', '?')}-day** training window."
     )
+    if run_config.get("skip_model_comparison"):
+        summary_sentence += " The cross-model comparison was skipped for a faster run."
+    st.markdown(summary_sentence)
 
     runtime_modes = dict(result.get("runtime_modes", {}))
     provenance = result.get("data_provenance", {})
@@ -396,46 +540,52 @@ def _render_pipeline_page() -> None:
         p3.metric("Synthetic Coverage", f"{float(provenance.get('synthetic_coverage_ratio', 0.0)):.2%}")
         p4.metric("Research Grade", "Yes" if runtime_modes.get("research_grade") else "No")
         st.caption(
-            f"Energy provenance rows: real={real_rows}, partial={partial_rows}, synthetic={synthetic_rows}, total={total_rows}"
+            f"Energy provenance rows: real {real_rows:,} · partially synthetic {partial_rows:,} · "
+            f"synthetic {synthetic_rows:,} · total {total_rows:,}"
         )
 
         energy_cache = cache_summary.get("energy", {})
         weather_cache = cache_summary.get("weather", {})
-        st.caption(
-            "Energy cache: "
-            f"{energy_cache.get('cache_status', 'unknown')} | "
-            f"used={energy_cache.get('cache_used', False)} | "
-            f"fetched_ranges={energy_cache.get('fetched_range_count', 0)} | "
-            f"freshness={energy_cache.get('cache_freshness_utc', 'n/a')}"
-        )
-        st.caption(
-            "Weather cache: "
-            f"{weather_cache.get('cache_status', 'unknown')} | "
-            f"used={weather_cache.get('cache_used', False)} | "
-            f"fetched_ranges={weather_cache.get('fetched_range_count', 0)} | "
-            f"freshness={weather_cache.get('cache_freshness_utc', 'n/a')}"
-        )
+        cache_col1, cache_col2 = st.columns(2)
+        with cache_col1:
+            st.markdown("**Energy cache**")
+            st.caption(
+                f"Status: {energy_cache.get('cache_status', 'unknown')} · "
+                f"Used: {'yes' if energy_cache.get('cache_used') else 'no'} · "
+                f"Fetched ranges: {energy_cache.get('fetched_range_count', 0)}"
+            )
+            st.caption(f"Freshness: {energy_cache.get('cache_freshness_utc', 'n/a')}")
+        with cache_col2:
+            st.markdown("**Weather cache**")
+            st.caption(
+                f"Status: {weather_cache.get('cache_status', 'unknown')} · "
+                f"Used: {'yes' if weather_cache.get('cache_used') else 'no'} · "
+                f"Fetched ranges: {weather_cache.get('fetched_range_count', 0)}"
+            )
+            st.caption(f"Freshness: {weather_cache.get('cache_freshness_utc', 'n/a')}")
 
     metrics_path = Path(result["metrics_path"])
     if metrics_path.exists():
         metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
         price_metrics = metrics.get("price", {})
+        st.subheader("Forecast Accuracy")
         c1, c2, c3, c4, c5, c6 = st.columns(6)
-        c1.metric("Demand MAE", f"{metrics['demand']['mae']:.2f}")
-        c2.metric("Demand RMSE", f"{metrics['demand']['rmse']:.2f}")
-        c3.metric("Renewable MAE", f"{metrics['renewable']['mae']:.2f}")
-        c4.metric("Renewable RMSE", f"{metrics['renewable']['rmse']:.2f}")
-        c5.metric("Price MAE", f"{price_metrics.get('mae', float('nan')):.2f}")
-        c6.metric("Price RMSE", f"{price_metrics.get('rmse', float('nan')):.2f}")
+        c1.metric("Demand MAE", f"{metrics['demand']['mae']:,.2f}")
+        c2.metric("Demand RMSE", f"{metrics['demand']['rmse']:,.2f}")
+        c3.metric("Renewable MAE", f"{metrics['renewable']['mae']:,.2f}")
+        c4.metric("Renewable RMSE", f"{metrics['renewable']['rmse']:,.2f}")
+        c5.metric("Price MAE", f"{price_metrics.get('mae', float('nan')):,.2f}")
+        c6.metric("Price RMSE", f"{price_metrics.get('rmse', float('nan')):,.2f}")
 
     backtest_metrics_path = Path("artifacts/simulation/backtest_metrics.json")
     if backtest_metrics_path.exists():
         bt = json.loads(backtest_metrics_path.read_text(encoding="utf-8"))
+        st.subheader("Backtest Summary")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Sharpe", f"{bt['sharpe_ratio']:.3f}")
-        c2.metric("Max Drawdown", f"{bt['max_drawdown']:.3f}")
-        c3.metric("Hit Rate", f"{bt['hit_rate']:.3f}")
-        c4.metric("Total PnL", f"{bt['total_pnl']:.2f}")
+        c2.metric("Max Drawdown", f"{bt['max_drawdown']:.1%}")
+        c3.metric("Hit Rate", f"{bt['hit_rate']:.1%}")
+        c4.metric("Total PnL", f"{bt['total_pnl']:,.2f} EUR")
 
     features_df: pd.DataFrame = result["features_df"]
     scored_df: pd.DataFrame = result["scored_df"]
@@ -446,27 +596,34 @@ def _render_pipeline_page() -> None:
     st.subheader("Latest Trading Signal")
     s1, s2, s3, s4, s5 = st.columns(5)
     s1.metric("Recommended Action", str(recommended_decision))
-    s2.metric("Predicted Price", f"{latest_signal['pred_price_eur_mwh']:.2f} EUR/MWh")
+    s2.metric("Predicted Price", f"{latest_signal['pred_price_eur_mwh']:,.2f} EUR/MWh")
     s3.metric(
         "Current Price",
-        f"{latest_signal['price_eur_mwh']:.2f} EUR/MWh",
-        delta=f"{latest_signal['pred_price_eur_mwh'] - latest_signal['price_eur_mwh']:.2f} EUR/MWh",
+        f"{latest_signal['price_eur_mwh']:,.2f} EUR/MWh",
+        delta=f"{latest_signal['pred_price_eur_mwh'] - latest_signal['price_eur_mwh']:,.2f} EUR/MWh",
     )
     s4.metric("Executed Position", f"{latest_signal['position']:.3f}")
-    s5.metric("Predicted Imbalance", f"{latest_signal['imbalance_pred']:.2f} MW")
+    s5.metric("Predicted Imbalance", f"{latest_signal['imbalance_pred']:,.2f} MW")
+
+    st.divider()
+    _render_research_summary(result)
 
     strategy_comparison = result.get("strategy_comparison", {})
     if strategy_comparison and "summary_df" in strategy_comparison:
+        st.divider()
         st.subheader("Strategy Comparison")
         st.dataframe(strategy_comparison["summary_df"], width="stretch")
         st.dataframe(strategy_comparison["significance_df"], width="stretch")
 
-    render_history_charts(features_df.tail(300))
-    render_prediction_chart(scored_df.tail(300))
-    render_backtest_chart(backtest_df.tail(300))
-
-    st.subheader("Research Summary")
-    st.json(result["research_summary"]["summary"])
+    st.divider()
+    st.subheader("Performance Charts")
+    history_tab, prediction_tab, backtest_tab = st.tabs(["Market History", "Predictions", "Backtest"])
+    with history_tab:
+        render_history_charts(features_df.tail(300))
+    with prediction_tab:
+        render_prediction_chart(scored_df.tail(300))
+    with backtest_tab:
+        render_backtest_chart(backtest_df.tail(300))
 
 
 def _render_review_details(review_df: pd.DataFrame, metrics: dict[str, object], analytics: dict[str, object], *, horizon_steps: int, hold_tolerance_decimal: float) -> None:
@@ -713,8 +870,23 @@ def _render_backtesting_review_page() -> None:
     _render_review_details(review_df, metrics, analytics, horizon_steps=horizon_steps, hold_tolerance_decimal=hold_tolerance_decimal)
 
 
-page = st.sidebar.radio("Menu", options=["Pipeline", "Backtesting Review"], index=0)
-if page == "Pipeline":
+st.sidebar.markdown("## Energy Trading Research")
+st.sidebar.caption("Walk-forward forecasting, regime-aware signals, and realistic backtesting for European power markets.")
+st.sidebar.divider()
+
+# The menu is pinned to the bottom of the sidebar: the active page is read from
+# session state first so each page can render its own controls above the menu,
+# and the radio itself is drawn afterwards. Changing it triggers a rerun that
+# picks up the new selection here.
+_PAGE_OPTIONS = ["Pipeline", "Backtesting Review"]
+_active_page = st.session_state.get("dashboard_menu", _PAGE_OPTIONS[0])
+if _active_page == "Pipeline":
     _render_pipeline_page()
 else:
     _render_backtesting_review_page()
+
+st.sidebar.divider()
+st.sidebar.radio("Menu", options=_PAGE_OPTIONS, key="dashboard_menu")
+
+st.divider()
+st.caption("Research tool only. Model forecasts are not financial advice. Validate independently before acting on any output.")
