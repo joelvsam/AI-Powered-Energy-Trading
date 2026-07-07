@@ -259,17 +259,23 @@ def _render_dashboard_theme() -> None:
             margin-bottom: 0.15rem;
         }
 
-        /* Metric tiles inside cards sit on the elevated surface. */
+        /* Metric tiles inside cards sit on the elevated surface and grow with
+           their content instead of stretching to a fixed row height. */
         [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stMetric"] {
             background: var(--quant-card-high);
             min-height: 0;
             padding: 0.8rem;
-            height: 100%;
+            height: auto;
         }
 
         /* Never clip text inside metric tiles or cards: wrap instead. */
+        [data-testid="stMetric"] {
+            height: auto;
+            overflow: visible;
+        }
+
         [data-testid="stMetricValue"],
-        [data-testid="stMetricValue"] > div {
+        [data-testid="stMetricValue"] * {
             white-space: normal !important;
             overflow: visible !important;
             text-overflow: clip !important;
@@ -363,6 +369,27 @@ def _bento_card(title: str | None = None):
     if title:
         card.markdown(f"##### {title}")
     return card
+
+
+def _status_tile(label: str, value: str) -> None:
+    """Metric-style tile for text values; wraps long text instead of truncating.
+
+    st.metric truncates values that exceed the tile width, so text-valued
+    tiles use this plain-div rendering that grows with its content.
+    """
+    st.markdown(
+        f"""
+        <div style="background: var(--quant-card-high); border: 1px solid var(--quant-border);
+                    border-radius: var(--quant-radius); padding: 0.8rem;">
+            <div style="color: var(--quant-muted); font-size: 0.72rem; font-weight: 700;
+                        text-transform: uppercase;">{label}</div>
+            <div style="color: var(--quant-text); font-family: var(--quant-mono); font-weight: 600;
+                        font-size: 1.15rem; line-height: 1.35; margin-top: 0.25rem;
+                        white-space: normal; overflow-wrap: anywhere;">{value}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _render_pipeline_sidebar() -> tuple[argparse.Namespace, bool]:
@@ -581,23 +608,28 @@ def _render_pipeline_page() -> None:
         if completed_at is not None:
             st.caption(f"Last run completed at {completed_at:%Y-%m-%d %H:%M} UTC")
         st.markdown(summary_sentence)
-        st.markdown(f"**Energy data:** {energy_label}")
-        if energy_type == "warning":
-            if runtime_modes.get("energy_source") == "entsoe_partial_synthetic":
-                st.warning("Cached and fetched ENTSO-E data were used, with unresolved gaps filled synthetically.", icon="⚠️")
+        m1, m2 = st.columns(2)
+        with m1:
+            _status_tile("Energy Data Mode", energy_label)
+            st.caption(f"Source key: `{runtime_modes.get('energy_source', 'unknown')}`")
+            if energy_type == "primary":
+                st.success("ENTSO-E API data was used for this run.")
+            elif energy_type == "warning":
+                if runtime_modes.get("energy_source") == "entsoe_partial_synthetic":
+                    st.warning("Cached and fetched ENTSO-E data were used, with unresolved gaps filled synthetically.", icon="⚠️")
+                else:
+                    st.warning("ENTSO-E was unavailable, so the pipeline used fully synthetic market data.", icon="⚠️")
             else:
-                st.warning("ENTSO-E was unavailable, so the pipeline used fully synthetic market data.", icon="⚠️")
-        elif energy_type == "primary":
-            st.caption("ENTSO-E API data was used for this run.")
-        else:
-            st.caption("Energy data mode could not be determined.")
-        st.markdown(f"**Research agent:** {llm_label}")
-        if llm_type == "primary":
-            st.caption(f"The Hugging Face LLM ({runtime_modes.get('llm_model', 'unknown')}) produced the research summary.")
-        elif llm_type == "warning":
-            st.caption("The pipeline fell back safely because the LLM was unavailable.")
-        else:
-            st.caption("Research agent mode could not be determined.")
+                st.info("Energy data mode could not be determined.")
+        with m2:
+            _status_tile("Research Agent Mode", llm_label)
+            st.caption(f"Model: `{runtime_modes.get('llm_model', 'unknown')}`")
+            if llm_type == "primary":
+                st.success("The Hugging Face LLM produced the research summary.")
+            elif llm_type == "warning":
+                st.warning("The pipeline fell back safely because the LLM was unavailable.")
+            else:
+                st.info("Research agent mode could not be determined.")
 
     with integrity_col, _bento_card("Data Integrity"):
         total_rows = int(provenance.get("row_count", 0))
