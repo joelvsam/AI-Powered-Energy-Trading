@@ -230,6 +230,69 @@ def _render_dashboard_theme() -> None:
             padding: 0.75rem;
         }
 
+        /* Bento grid cards: bordered containers become rounded tiles. */
+        [data-testid="stVerticalBlockBorderWrapper"] {
+            background: var(--quant-card);
+            border: 1px solid var(--quant-border);
+            border-radius: 14px;
+            padding: 1.1rem 1.2rem 1.2rem 1.2rem;
+            height: 100%;
+        }
+
+        [data-testid="stVerticalBlockBorderWrapper"]:hover {
+            border-color: var(--quant-border-soft);
+        }
+
+        [data-testid="stColumn"] > [data-testid="stVerticalBlock"],
+        [data-testid="stColumn"] [data-testid="stVerticalBlockBorderWrapper"] {
+            height: 100%;
+        }
+
+        /* Card titles rendered as h5. */
+        h5 {
+            color: var(--quant-subtle);
+            font-size: 0.78rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            border-bottom: none;
+            margin-bottom: 0.15rem;
+        }
+
+        /* Metric tiles inside cards sit on the elevated surface. */
+        [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stMetric"] {
+            background: var(--quant-card-high);
+            min-height: 0;
+            padding: 0.8rem;
+            height: 100%;
+        }
+
+        /* Never clip text inside metric tiles or cards: wrap instead. */
+        [data-testid="stMetricValue"],
+        [data-testid="stMetricValue"] > div {
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            font-size: 1.3rem;
+            line-height: 1.3;
+        }
+
+        [data-testid="stMetricLabel"],
+        [data-testid="stMetricLabel"] p {
+            white-space: normal !important;
+            overflow: visible !important;
+            text-overflow: clip !important;
+            overflow-wrap: break-word;
+        }
+
+        [data-testid="stVerticalBlockBorderWrapper"] p,
+        [data-testid="stVerticalBlockBorderWrapper"] li,
+        [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stCaptionContainer"] {
+            overflow-wrap: anywhere;
+        }
+
         code, pre {
             color: var(--quant-primary);
             font-family: var(--quant-mono);
@@ -292,6 +355,14 @@ def _render_environment_diagnostics() -> None:
 
 
 MODEL_DISPLAY_NAMES = {"xgboost": "XGBoost", "lstm": "LSTM", "prophet": "Prophet"}
+
+
+def _bento_card(title: str | None = None):
+    """Bordered container styled as a bento-grid tile by the dashboard theme."""
+    card = st.container(border=True)
+    if title:
+        card.markdown(f"##### {title}")
+    return card
 
 
 def _render_pipeline_sidebar() -> tuple[argparse.Namespace, bool]:
@@ -379,7 +450,12 @@ def _render_research_summary(result: dict) -> None:
     if not summary:
         return
 
-    st.subheader("Research Summary")
+    card = _bento_card("Research Summary")
+    with card:
+        _render_research_summary_body(research, summary)
+
+
+def _render_research_summary_body(research: dict, summary: dict) -> None:
     research_grade = bool(summary.get("energy_source_research_grade", False))
     llm_generated = str(summary.get("source", "")).strip().lower() == "huggingface"
     badge_col1, badge_col2 = st.columns(2)
@@ -467,10 +543,7 @@ def _render_pipeline_page() -> None:
         _render_empty_state()
         return
 
-    st.success("Pipeline completed")
     completed_at = st.session_state.get("pipeline_completed_at")
-    if completed_at is not None:
-        st.caption(f"Last run completed at {completed_at:%Y-%m-%d %H:%M} UTC")
     run_config = result["config"]
     model_key = str(run_config.get("model", "unknown"))
     summary_sentence = (
@@ -480,7 +553,6 @@ def _render_pipeline_page() -> None:
     )
     if run_config.get("skip_model_comparison"):
         summary_sentence += " The cross-model comparison was skipped for a faster run."
-    st.markdown(summary_sentence)
 
     runtime_modes = dict(result.get("runtime_modes", {}))
     provenance = result.get("data_provenance", {})
@@ -503,89 +575,94 @@ def _render_pipeline_page() -> None:
         },
     )
 
-    st.subheader("Runtime Modes")
-    m1, m2 = st.columns(2)
-    with m1:
-        st.metric("Energy Data Mode", energy_label)
-        st.caption(f"Source key: `{runtime_modes.get('energy_source', 'unknown')}`")
-        if energy_type == "primary":
-            st.success("ENTSO-E API data was used for this run.")
-        elif energy_type == "warning":
+    overview_col, integrity_col = st.columns([3, 2], gap="medium")
+    with overview_col, _bento_card("Run Overview"):
+        st.success("Pipeline completed")
+        if completed_at is not None:
+            st.caption(f"Last run completed at {completed_at:%Y-%m-%d %H:%M} UTC")
+        st.markdown(summary_sentence)
+        st.markdown(f"**Energy data:** {energy_label}")
+        if energy_type == "warning":
             if runtime_modes.get("energy_source") == "entsoe_partial_synthetic":
-                st.warning("Cached and fetched ENTSO-E data were used, with unresolved gaps filled synthetically.")
+                st.warning("Cached and fetched ENTSO-E data were used, with unresolved gaps filled synthetically.", icon="⚠️")
             else:
-                st.warning("ENTSO-E was unavailable, so the pipeline used fully synthetic market data.")
+                st.warning("ENTSO-E was unavailable, so the pipeline used fully synthetic market data.", icon="⚠️")
+        elif energy_type == "primary":
+            st.caption("ENTSO-E API data was used for this run.")
         else:
-            st.info("Energy data mode could not be determined.")
-    with m2:
-        st.metric("Research Agent Mode", llm_label)
-        st.caption(f"Model: `{runtime_modes.get('llm_model', 'unknown')}`")
+            st.caption("Energy data mode could not be determined.")
+        st.markdown(f"**Research agent:** {llm_label}")
         if llm_type == "primary":
-            st.success("The Hugging Face LLM produced the research summary.")
+            st.caption(f"The Hugging Face LLM ({runtime_modes.get('llm_model', 'unknown')}) produced the research summary.")
         elif llm_type == "warning":
-            st.warning("The pipeline fell back safely because the LLM was unavailable.")
+            st.caption("The pipeline fell back safely because the LLM was unavailable.")
         else:
-            st.info("Research agent mode could not be determined.")
+            st.caption("Research agent mode could not be determined.")
 
-    cache_summary = result.get("cache_summary", {})
-    if provenance or cache_summary:
-        st.subheader("Cache and Provenance")
-        p1, p2, p3, p4 = st.columns(4)
+    with integrity_col, _bento_card("Data Integrity"):
         total_rows = int(provenance.get("row_count", 0))
         real_rows = int(provenance.get("real_rows", 0))
         partial_rows = int(provenance.get("partially_synthetic_rows", 0))
         synthetic_rows = int(provenance.get("synthetic_rows", 0))
-        p1.metric("Real Coverage", f"{float(provenance.get('real_coverage_ratio', 0.0)):.2%}")
-        p2.metric("Partial Synthetic", f"{float(provenance.get('partial_synthetic_coverage_ratio', 0.0)):.2%}")
-        p3.metric("Synthetic Coverage", f"{float(provenance.get('synthetic_coverage_ratio', 0.0)):.2%}")
-        p4.metric("Research Grade", "Yes" if runtime_modes.get("research_grade") else "No")
+        g1, g2 = st.columns(2)
+        g1.metric("Research Grade", "Yes" if runtime_modes.get("research_grade") else "No")
+        g2.metric("Real Coverage", f"{float(provenance.get('real_coverage_ratio', 0.0)):.2%}")
+        g3, g4 = st.columns(2)
+        g3.metric("Partial Synthetic", f"{float(provenance.get('partial_synthetic_coverage_ratio', 0.0)):.2%}")
+        g4.metric("Synthetic", f"{float(provenance.get('synthetic_coverage_ratio', 0.0)):.2%}")
         st.caption(
-            f"Energy provenance rows: real {real_rows:,} · partially synthetic {partial_rows:,} · "
+            f"Rows: real {real_rows:,} · partially synthetic {partial_rows:,} · "
             f"synthetic {synthetic_rows:,} · total {total_rows:,}"
         )
+        cache_summary = result.get("cache_summary", {})
+        if cache_summary:
+            with st.expander("Cache details"):
+                energy_cache = cache_summary.get("energy", {})
+                weather_cache = cache_summary.get("weather", {})
+                st.markdown("**Energy cache**")
+                st.caption(
+                    f"Status: {energy_cache.get('cache_status', 'unknown')} · "
+                    f"Used: {'yes' if energy_cache.get('cache_used') else 'no'} · "
+                    f"Fetched ranges: {energy_cache.get('fetched_range_count', 0)}"
+                )
+                st.caption(f"Freshness: {energy_cache.get('cache_freshness_utc', 'n/a')}")
+                st.markdown("**Weather cache**")
+                st.caption(
+                    f"Status: {weather_cache.get('cache_status', 'unknown')} · "
+                    f"Used: {'yes' if weather_cache.get('cache_used') else 'no'} · "
+                    f"Fetched ranges: {weather_cache.get('fetched_range_count', 0)}"
+                )
+                st.caption(f"Freshness: {weather_cache.get('cache_freshness_utc', 'n/a')}")
 
-        energy_cache = cache_summary.get("energy", {})
-        weather_cache = cache_summary.get("weather", {})
-        cache_col1, cache_col2 = st.columns(2)
-        with cache_col1:
-            st.markdown("**Energy cache**")
-            st.caption(
-                f"Status: {energy_cache.get('cache_status', 'unknown')} · "
-                f"Used: {'yes' if energy_cache.get('cache_used') else 'no'} · "
-                f"Fetched ranges: {energy_cache.get('fetched_range_count', 0)}"
-            )
-            st.caption(f"Freshness: {energy_cache.get('cache_freshness_utc', 'n/a')}")
-        with cache_col2:
-            st.markdown("**Weather cache**")
-            st.caption(
-                f"Status: {weather_cache.get('cache_status', 'unknown')} · "
-                f"Used: {'yes' if weather_cache.get('cache_used') else 'no'} · "
-                f"Fetched ranges: {weather_cache.get('fetched_range_count', 0)}"
-            )
-            st.caption(f"Freshness: {weather_cache.get('cache_freshness_utc', 'n/a')}")
+    forecast_col, backtest_col = st.columns([3, 2], gap="medium")
+    with forecast_col, _bento_card("Forecast Accuracy"):
+        metrics_path = Path(result["metrics_path"])
+        if metrics_path.exists():
+            metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+            price_metrics = metrics.get("price", {})
+            f1, f2, f3 = st.columns(3)
+            f1.metric("Price MAE", f"{price_metrics.get('mae', float('nan')):,.2f}")
+            f2.metric("Demand MAE", f"{metrics['demand']['mae']:,.2f}")
+            f3.metric("Renewable MAE", f"{metrics['renewable']['mae']:,.2f}")
+            f4, f5, f6 = st.columns(3)
+            f4.metric("Price RMSE", f"{price_metrics.get('rmse', float('nan')):,.2f}")
+            f5.metric("Demand RMSE", f"{metrics['demand']['rmse']:,.2f}")
+            f6.metric("Renewable RMSE", f"{metrics['renewable']['rmse']:,.2f}")
+        else:
+            st.caption("Training metrics file not found for this run.")
 
-    metrics_path = Path(result["metrics_path"])
-    if metrics_path.exists():
-        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-        price_metrics = metrics.get("price", {})
-        st.subheader("Forecast Accuracy")
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
-        c1.metric("Demand MAE", f"{metrics['demand']['mae']:,.2f}")
-        c2.metric("Demand RMSE", f"{metrics['demand']['rmse']:,.2f}")
-        c3.metric("Renewable MAE", f"{metrics['renewable']['mae']:,.2f}")
-        c4.metric("Renewable RMSE", f"{metrics['renewable']['rmse']:,.2f}")
-        c5.metric("Price MAE", f"{price_metrics.get('mae', float('nan')):,.2f}")
-        c6.metric("Price RMSE", f"{price_metrics.get('rmse', float('nan')):,.2f}")
-
-    backtest_metrics_path = Path("artifacts/simulation/backtest_metrics.json")
-    if backtest_metrics_path.exists():
-        bt = json.loads(backtest_metrics_path.read_text(encoding="utf-8"))
-        st.subheader("Backtest Summary")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Sharpe", f"{bt['sharpe_ratio']:.3f}")
-        c2.metric("Max Drawdown", f"{bt['max_drawdown']:.1%}")
-        c3.metric("Hit Rate", f"{bt['hit_rate']:.1%}")
-        c4.metric("Total PnL", f"{bt['total_pnl']:,.2f} EUR")
+    with backtest_col, _bento_card("Backtest Summary"):
+        backtest_metrics_path = Path("artifacts/simulation/backtest_metrics.json")
+        if backtest_metrics_path.exists():
+            bt = json.loads(backtest_metrics_path.read_text(encoding="utf-8"))
+            b1, b2 = st.columns(2)
+            b1.metric("Sharpe", f"{bt['sharpe_ratio']:.3f}")
+            b2.metric("Max Drawdown", f"{bt['max_drawdown']:.1%}")
+            b3, b4 = st.columns(2)
+            b3.metric("Hit Rate", f"{bt['hit_rate']:.1%}")
+            b4.metric("Total PnL", f"{bt['total_pnl']:,.2f} EUR")
+        else:
+            st.caption("Backtest metrics file not found for this run.")
 
     features_df: pd.DataFrame = result["features_df"]
     scored_df: pd.DataFrame = result["scored_df"]
@@ -593,37 +670,37 @@ def _render_pipeline_page() -> None:
 
     latest_signal = backtest_df.sort_values("timestamp_utc").iloc[-1]
     recommended_decision = latest_signal.get("recommended_decision", latest_signal["decision"])
-    st.subheader("Latest Trading Signal")
-    s1, s2, s3, s4, s5 = st.columns(5)
-    s1.metric("Recommended Action", str(recommended_decision))
-    s2.metric("Predicted Price", f"{latest_signal['pred_price_eur_mwh']:,.2f} EUR/MWh")
-    s3.metric(
-        "Current Price",
-        f"{latest_signal['price_eur_mwh']:,.2f} EUR/MWh",
-        delta=f"{latest_signal['pred_price_eur_mwh'] - latest_signal['price_eur_mwh']:,.2f} EUR/MWh",
-    )
-    s4.metric("Executed Position", f"{latest_signal['position']:.3f}")
-    s5.metric("Predicted Imbalance", f"{latest_signal['imbalance_pred']:,.2f} MW")
+    with _bento_card("Latest Trading Signal"):
+        s1, s2, s3, s4, s5 = st.columns(5)
+        s1.metric("Recommended Action", str(recommended_decision))
+        s2.metric("Predicted Price", f"{latest_signal['pred_price_eur_mwh']:,.2f} EUR/MWh")
+        s3.metric(
+            "Current Price",
+            f"{latest_signal['price_eur_mwh']:,.2f} EUR/MWh",
+            delta=f"{latest_signal['pred_price_eur_mwh'] - latest_signal['price_eur_mwh']:,.2f} EUR/MWh",
+        )
+        s4.metric("Executed Position", f"{latest_signal['position']:.3f}")
+        s5.metric("Predicted Imbalance", f"{latest_signal['imbalance_pred']:,.2f} MW")
 
-    st.divider()
     _render_research_summary(result)
 
     strategy_comparison = result.get("strategy_comparison", {})
     if strategy_comparison and "summary_df" in strategy_comparison:
-        st.divider()
-        st.subheader("Strategy Comparison")
-        st.dataframe(strategy_comparison["summary_df"], width="stretch")
-        st.dataframe(strategy_comparison["significance_df"], width="stretch")
+        with _bento_card("Strategy Comparison"):
+            metrics_tab, significance_tab = st.tabs(["Strategy Metrics", "Significance vs Baselines"])
+            with metrics_tab:
+                st.dataframe(strategy_comparison["summary_df"], width="stretch")
+            with significance_tab:
+                st.dataframe(strategy_comparison["significance_df"], width="stretch")
 
-    st.divider()
-    st.subheader("Performance Charts")
-    history_tab, prediction_tab, backtest_tab = st.tabs(["Market History", "Predictions", "Backtest"])
-    with history_tab:
-        render_history_charts(features_df.tail(300))
-    with prediction_tab:
-        render_prediction_chart(scored_df.tail(300))
-    with backtest_tab:
-        render_backtest_chart(backtest_df.tail(300))
+    with _bento_card("Performance Charts"):
+        history_tab, prediction_tab, backtest_tab = st.tabs(["Market History", "Predictions", "Backtest"])
+        with history_tab:
+            render_history_charts(features_df.tail(300))
+        with prediction_tab:
+            render_prediction_chart(scored_df.tail(300))
+        with backtest_tab:
+            render_backtest_chart(backtest_df.tail(300))
 
 
 def _render_review_details(review_df: pd.DataFrame, metrics: dict[str, object], analytics: dict[str, object], *, horizon_steps: int, hold_tolerance_decimal: float) -> None:
@@ -646,37 +723,44 @@ def _render_review_details(review_df: pd.DataFrame, metrics: dict[str, object], 
         st.warning("No rows match the selected date range.")
         return
 
-    st.subheader("Backtesting Scorecard")
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("Sharpe", f"{float(metrics.get('sharpe_ratio', 0.0)):.3f}")
-    m2.metric("Max Drawdown", f"{float(metrics.get('max_drawdown', 0.0)):.3f}")
-    m3.metric("Hit Rate", f"{float(metrics.get('hit_rate', 0.0)):.3f}")
-    m4.metric("Total PnL", f"{float(metrics.get('total_pnl', 0.0)):.2f}")
-    m5.metric("Trade Count", f"{int(metrics.get('trade_count', 0))}")
-    m6.metric("Avg Trade Return", f"{float(metrics.get('average_trade_return', 0.0)):.4f}")
+    scorecard_col, accuracy_col = st.columns(2, gap="medium")
+    with scorecard_col, _bento_card("Backtesting Scorecard"):
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Sharpe", f"{float(metrics.get('sharpe_ratio', 0.0)):.3f}")
+        m2.metric("Max Drawdown", f"{float(metrics.get('max_drawdown', 0.0)):.3f}")
+        m3.metric("Hit Rate", f"{float(metrics.get('hit_rate', 0.0)):.3f}")
+        m4, m5, m6 = st.columns(3)
+        m4.metric("Total PnL", f"{float(metrics.get('total_pnl', 0.0)):,.2f}")
+        m5.metric("Trade Count", f"{int(metrics.get('trade_count', 0)):,}")
+        m6.metric("Avg Trade Return", f"{float(metrics.get('average_trade_return', 0.0)):.4f}")
 
-    st.subheader("Decision Accuracy Review")
-    a1, a2, a3, a4, a5 = st.columns(5)
-    a1.metric("Directional Accuracy", f"{review_summary['directional_accuracy']:.3f}")
-    a2.metric("Positive PnL Rate", f"{review_summary['pnl_positive_rate']:.3f}")
-    a3.metric("Correct Decisions", f"{review_summary['correct_count']}")
-    a4.metric("Incorrect Decisions", f"{review_summary['incorrect_count']}")
-    a5.metric("Evaluable Rows", f"{review_summary['evaluable_rows']}")
+    with accuracy_col, _bento_card("Decision Accuracy"):
+        a1, a2, a3 = st.columns(3)
+        a1.metric("Directional Accuracy", f"{review_summary['directional_accuracy']:.3f}")
+        a2.metric("Positive PnL Rate", f"{review_summary['pnl_positive_rate']:.3f}")
+        a3.metric("Evaluable Rows", f"{review_summary['evaluable_rows']:,}")
+        a4, a5, a6 = st.columns(3)
+        a4.metric("Correct", f"{review_summary['correct_count']:,}")
+        a5.metric("Incorrect", f"{review_summary['incorrect_count']:,}")
+        distribution = review_summary["decision_distribution"]
+        a6.metric("Long / Short / Hold", f"{distribution['LONG']} / {distribution['SHORT']} / {distribution['HOLD']}")
+        st.caption(
+            f"Accuracy horizon: {review_summary['accuracy_horizon_steps']} step(s). "
+            f"HOLD tolerance band: {review_summary['hold_tolerance_pct'] * 100:.2f}%."
+        )
 
-    distribution = review_summary["decision_distribution"]
-    d1, d2, d3 = st.columns(3)
-    d1.metric("LONG Count", f"{distribution['LONG']}")
-    d2.metric("SHORT Count", f"{distribution['SHORT']}")
-    d3.metric("HOLD Count", f"{distribution['HOLD']}")
-
-    st.caption(
-        f"Accuracy horizon: {review_summary['accuracy_horizon_steps']} step(s). HOLD tolerance band: {review_summary['hold_tolerance_pct'] * 100:.2f}%."
-    )
-
-    render_prediction_chart(filtered_df.tail(300))
-    render_equity_chart(filtered_df.tail(300))
-    render_review_accuracy_chart(filtered_df.tail(300))
-    render_decision_review_table(filtered_df.sort_values("timestamp_utc", ascending=False))
+    with _bento_card("Review Charts"):
+        prediction_tab, equity_tab, accuracy_tab, decisions_tab = st.tabs(
+            ["Predictions", "Equity Curve", "Accuracy", "Decision Log"]
+        )
+        with prediction_tab:
+            render_prediction_chart(filtered_df.tail(300))
+        with equity_tab:
+            render_equity_chart(filtered_df.tail(300))
+        with accuracy_tab:
+            render_review_accuracy_chart(filtered_df.tail(300))
+        with decisions_tab:
+            render_decision_review_table(filtered_df.sort_values("timestamp_utc", ascending=False))
 
     with st.expander("Accuracy Metadata"):
         st.json(
@@ -853,10 +937,10 @@ def _render_backtesting_review_page() -> None:
         if training_metrics_path.exists():
             training_metrics = json.loads(training_metrics_path.read_text(encoding="utf-8"))
             price_metrics = training_metrics.get("price", {})
-            st.subheader("Forecast Metrics")
-            f1, f2 = st.columns(2)
-            f1.metric("Price MAE", f"{float(price_metrics.get('mae', float('nan'))):.3f}")
-            f2.metric("Price RMSE", f"{float(price_metrics.get('rmse', float('nan'))):.3f}")
+            with _bento_card("Forecast Metrics"):
+                f1, f2 = st.columns(2)
+                f1.metric("Price MAE", f"{float(price_metrics.get('mae', float('nan'))):.3f}")
+                f2.metric("Price RMSE", f"{float(price_metrics.get('rmse', float('nan'))):.3f}")
         _render_review_details(review_df, metrics, analytics, horizon_steps=horizon_steps, hold_tolerance_decimal=hold_tolerance_decimal)
         return
 
