@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -62,10 +63,31 @@ def _render_dashboard_theme() -> None:
             --quant-sans: Inter, "Segoe UI", Roboto, Arial, sans-serif;
         }
 
+        /* Page background lives on body so the animation canvas (z-index -1)
+           can paint above it while staying behind all app content. */
+        html, body {
+            background: #0b0f10;
+        }
+
         .stApp {
-            background: var(--quant-bg);
+            background: transparent;
             color: var(--quant-text);
             font-family: var(--quant-sans);
+        }
+
+        /* Background animation component: fixed full-viewport, behind content,
+           never intercepting the pointer. The app's only iframe is this one. */
+        .stApp iframe[title="st.components.v1.html"],
+        .stApp [data-testid="stCustomComponentV1"] iframe,
+        .stApp iframe[srcdoc] {
+            position: fixed !important;
+            inset: 0 !important;
+            width: 100vw !important;
+            height: 100vh !important;
+            border: none !important;
+            z-index: -1 !important;
+            pointer-events: none !important;
+            background: transparent !important;
         }
 
         .block-container {
@@ -331,7 +353,224 @@ def _render_dashboard_theme() -> None:
     )
 
 
+def _render_background_animation() -> None:
+    """Full-viewport 'transmission grid pulse' canvas behind the app content.
+
+    A faint jittered lattice evokes a transmission network; small bright pulses
+    travel along its edges and hop to a connected edge at each junction. Edges
+    near the pointer light up. Rendered in the components iframe (the app's
+    only iframe), which the theme CSS fixes across the viewport at z-index -1
+    with pointer-events disabled; mouse coordinates are read from the parent
+    document so the animation reacts without ever intercepting the pointer.
+    """
+    components.html(
+        """
+<canvas id="bg"></canvas>
+<style>html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }</style>
+<script>
+(function () {
+    const canvas = document.getElementById("bg");
+    const ctx = canvas.getContext("2d");
+    let parentDoc = null;
+    let parentWin = window;
+    try {
+        parentDoc = window.parent.document;
+        parentWin = window.parent;
+    } catch (err) {
+        parentDoc = document;
+    }
+
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    let w = 0;
+    let h = 0;
+
+    const SPACING = 96;
+    const JITTER = 18;
+    const MOUSE_DIST = 160;
+    const COLORS = ["57, 135, 229", "52, 211, 153", "144, 133, 233"];
+
+    let nodes = [];
+    let edges = [];
+    let nodeEdges = [];
+    let pulses = [];
+
+    function buildGrid() {
+        nodes = [];
+        edges = [];
+        nodeEdges = [];
+        pulses = [];
+        const cols = Math.ceil(w / SPACING) + 2;
+        const rows = Math.ceil(h / SPACING) + 2;
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                nodes.push({
+                    x: (c - 0.5) * SPACING + (Math.random() - 0.5) * 2 * JITTER,
+                    y: (r - 0.5) * SPACING + (Math.random() - 0.5) * 2 * JITTER,
+                });
+            }
+        }
+        nodeEdges = nodes.map(function () { return []; });
+        function addEdge(a, b) {
+            if (Math.random() < 0.12) return;  // drop some edges for irregularity
+            const index = edges.length;
+            edges.push({ a: a, b: b });
+            nodeEdges[a].push(index);
+            nodeEdges[b].push(index);
+        }
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                const i = r * cols + c;
+                if (c + 1 < cols) addEdge(i, i + 1);
+                if (r + 1 < rows) addEdge(i, i + cols);
+                if (c + 1 < cols && r + 1 < rows && Math.random() < 0.16) addEdge(i, i + cols + 1);
+            }
+        }
+        const pulseCount = Math.max(8, Math.min(18, Math.floor((w * h) / 130000)));
+        for (let p = 0; p < pulseCount; p++) {
+            const e = Math.floor(Math.random() * edges.length);
+            pulses.push({
+                edge: e,
+                from: Math.random() < 0.5 ? edges[e].a : edges[e].b,
+                t: Math.random(),
+                speed: 55 + Math.random() * 50,  // px per second
+                color: COLORS[p % COLORS.length],
+            });
+        }
+    }
+
+    function resize() {
+        w = parentDoc.documentElement.clientWidth || window.innerWidth;
+        h = parentDoc.documentElement.clientHeight || window.innerHeight;
+        canvas.width = w * dpr;
+        canvas.height = h * dpr;
+        canvas.style.width = w + "px";
+        canvas.style.height = h + "px";
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        buildGrid();
+    }
+    resize();
+    parentWin.addEventListener("resize", resize);
+
+    const mouse = { x: -1e4, y: -1e4 };
+    parentDoc.addEventListener("mousemove", function (e) {
+        mouse.x = e.clientX;
+        mouse.y = e.clientY;
+    });
+    parentDoc.addEventListener("mouseleave", function () {
+        mouse.x = -1e4;
+        mouse.y = -1e4;
+    });
+
+    function segmentDistance(px, py, ax, ay, bx, by) {
+        const dx = bx - ax;
+        const dy = by - ay;
+        const lengthSq = dx * dx + dy * dy;
+        let t = lengthSq ? ((px - ax) * dx + (py - ay) * dy) / lengthSq : 0;
+        t = Math.max(0, Math.min(1, t));
+        return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+    }
+
+    function drawLattice() {
+        for (const edge of edges) {
+            const a = nodes[edge.a];
+            const b = nodes[edge.b];
+            let alpha = 0.055;
+            const d = segmentDistance(mouse.x, mouse.y, a.x, a.y, b.x, b.y);
+            if (d < MOUSE_DIST) {
+                alpha += (1 - d / MOUSE_DIST) * 0.22;  // edges light up near the pointer
+            }
+            ctx.strokeStyle = "rgba(180, 197, 255, " + alpha.toFixed(3) + ")";
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+        }
+        ctx.fillStyle = "rgba(180, 197, 255, 0.10)";
+        for (const n of nodes) {
+            ctx.beginPath();
+            ctx.arc(n.x, n.y, 1.4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    function advancePulse(pulse, dt) {
+        const edge = edges[pulse.edge];
+        const start = nodes[pulse.from];
+        const endIndex = edge.a === pulse.from ? edge.b : edge.a;
+        const end = nodes[endIndex];
+        const length = Math.max(Math.hypot(end.x - start.x, end.y - start.y), 1);
+        pulse.t += (pulse.speed * dt) / length;
+        if (pulse.t >= 1) {
+            // Hop to a random connected edge at the junction just reached.
+            const candidates = nodeEdges[endIndex].filter(function (index) { return index !== pulse.edge; });
+            pulse.edge = candidates.length
+                ? candidates[Math.floor(Math.random() * candidates.length)]
+                : pulse.edge;
+            pulse.from = endIndex;
+            pulse.t = 0;
+        }
+    }
+
+    function drawPulse(pulse) {
+        const edge = edges[pulse.edge];
+        const start = nodes[pulse.from];
+        const endIndex = edge.a === pulse.from ? edge.b : edge.a;
+        const end = nodes[endIndex];
+        const x = start.x + (end.x - start.x) * pulse.t;
+        const y = start.y + (end.y - start.y) * pulse.t;
+        const tailT = Math.max(0, pulse.t - 0.22);
+        const tx = start.x + (end.x - start.x) * tailT;
+        const ty = start.y + (end.y - start.y) * tailT;
+        const nearMouse = Math.hypot(x - mouse.x, y - mouse.y) < MOUSE_DIST;
+        ctx.strokeStyle = "rgba(" + pulse.color + ", " + (nearMouse ? 0.55 : 0.3) + ")";
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.moveTo(tx, ty);
+        ctx.lineTo(x, y);
+        ctx.stroke();
+        ctx.fillStyle = "rgba(" + pulse.color + ", " + (nearMouse ? 0.95 : 0.65) + ")";
+        ctx.beginPath();
+        ctx.arc(x, y, nearMouse ? 2.6 : 1.9, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    let lastTime = performance.now();
+    function step(now) {
+        const dt = Math.min((now - lastTime) / 1000, 0.05);
+        lastTime = now;
+        ctx.clearRect(0, 0, w, h);
+        drawLattice();
+        for (const pulse of pulses) {
+            advancePulse(pulse, dt);
+            drawPulse(pulse);
+        }
+    }
+
+    let reducedMotion = false;
+    try {
+        reducedMotion = parentWin.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    } catch (err) {
+        reducedMotion = false;
+    }
+    if (reducedMotion) {
+        ctx.clearRect(0, 0, w, h);
+        drawLattice();
+    } else {
+        (function loop(now) {
+            step(now || performance.now());
+            requestAnimationFrame(loop);
+        })(performance.now());
+    }
+})();
+</script>
+        """,
+        height=1,
+    )
+
+
 _render_dashboard_theme()
+_render_background_animation()
 
 
 def _mode_label(value: str, mapping: dict[str, tuple[str, str]]) -> tuple[str, str]:
