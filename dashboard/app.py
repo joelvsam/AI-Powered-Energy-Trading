@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -77,8 +76,8 @@ def _render_dashboard_theme() -> None:
 
         /* Background animation component: fixed full-viewport, behind content,
            never intercepting the pointer. The app's only iframe is this one. */
-        .stApp iframe[title="st.components.v1.html"],
-        .stApp [data-testid="stCustomComponentV1"] iframe,
+        .stApp [data-testid="stIFrame"] iframe,
+        .stApp iframe[data-testid="stIFrame"],
         .stApp iframe[srcdoc] {
             position: fixed !important;
             inset: 0 !important;
@@ -358,12 +357,12 @@ def _render_background_animation() -> None:
 
     A faint jittered lattice evokes a transmission network; small bright pulses
     travel along its edges and hop to a connected edge at each junction. Edges
-    near the pointer light up. Rendered in the components iframe (the app's
+    near the pointer light up. Rendered via st.iframe (the app's
     only iframe), which the theme CSS fixes across the viewport at z-index -1
     with pointer-events disabled; mouse coordinates are read from the parent
     document so the animation reacts without ever intercepting the pointer.
     """
-    components.html(
+    st.iframe(
         """
 <canvas id="bg"></canvas>
 <style>html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }</style>
