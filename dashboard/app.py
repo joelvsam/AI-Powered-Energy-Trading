@@ -589,11 +589,11 @@ def _energy_mode_from_provenance(summary: dict[str, object]) -> str:
 
 
 def _render_environment_diagnostics() -> None:
+    """Environment status shown in the sidebar so page content stays focused."""
     cfg = AppConfig()
-    with st.expander("Environment Diagnostics"):
-        key_col, token_col = st.columns(2)
-        key_col.markdown(f"**ENTSO-E API key:** {'loaded' if cfg.entsoe_api_key else 'not found'}")
-        token_col.markdown(f"**Hugging Face token:** {'loaded' if cfg.hf_token else 'not found'}")
+    with st.sidebar.expander("Environment Diagnostics"):
+        st.markdown(f"**ENTSO-E API key:** {'loaded' if cfg.entsoe_api_key else 'not found'}")
+        st.markdown(f"**Hugging Face token:** {'loaded' if cfg.hf_token else 'not found'}")
         st.caption(f"Python: `{sys.executable}`")
         st.caption(f"Project root: `{Path(__file__).parent.parent.resolve()}`")
 
@@ -786,9 +786,14 @@ def _render_research_summary_body(research: dict, summary: dict) -> None:
 def _render_pipeline_page() -> None:
     args, run_clicked = _render_pipeline_sidebar()
 
-    st.title("Energy Trading Dashboard")
-    st.caption("Configure the run in the sidebar, then launch the full volatility-aware trading pipeline.")
-    _render_environment_diagnostics()
+    st.title("AI Powered Energy Trading Dashboard")
+    st.caption(
+        "This page produces an AI/ML-driven trading decision for European power markets: it pulls ENTSO-E "
+        "market and weather history, trains the selected machine-learning forecasting model with walk-forward "
+        "validation, and turns its predictions into a LONG / SHORT / HOLD recommendation backtested under "
+        "realistic execution costs against baseline strategies. Configure the run in the sidebar and click "
+        "Run Pipeline; the latest decision, results, and research note appear below."
+    )
 
     result = st.session_state.get("pipeline_result")
     if run_clicked:
@@ -1044,8 +1049,11 @@ def _render_review_details(review_df: pd.DataFrame, metrics: dict[str, object], 
 
 def _render_backtesting_review_page() -> None:
     st.title("Backtesting Review")
-    st.caption("Review isolated backtest scores and compare past decisions against realized outcomes.")
-    _render_environment_diagnostics()
+    st.caption(
+        "This page reviews completed backtests without rerunning the research pipeline: load the latest saved "
+        "artifacts, run an isolated backtest from a scored CSV, or compare trained models side by side. "
+        "Each decision is scored against the price move that actually followed it."
+    )
 
     st.sidebar.subheader("Backtesting Review Controls")
     load_mode = st.sidebar.radio(
@@ -1240,6 +1248,7 @@ else:
     _render_backtesting_review_page()
 
 st.sidebar.divider()
+_render_environment_diagnostics()
 st.sidebar.radio("Menu", options=_PAGE_OPTIONS, key="dashboard_menu")
 
 st.divider()
