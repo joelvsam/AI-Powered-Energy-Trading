@@ -637,10 +637,15 @@ def _render_pipeline_sidebar() -> tuple[argparse.Namespace, bool]:
     cfg = AppConfig()
     weather_lat, weather_lon = cfg.openmeteo_coords_for_zone(region)
     st.sidebar.caption(f"Open-Meteo coordinates: {weather_lat:.4f}, {weather_lon:.4f}")
-    lookback_days = st.sidebar.selectbox("Training Window (days)", options=[90, 180, 365], index=1)
+    lookback_days = st.sidebar.selectbox("Training Window (days)", options=[90, 180, 365], index=0)
     model = st.sidebar.selectbox("Model", options=["xgboost", "lstm", "prophet"], index=0)
     horizon = st.sidebar.slider("Simulation Horizon", min_value=12, max_value=168, value=24, step=12)
-    skip_model_comparison = st.sidebar.checkbox("Skip full model comparison", value=False, help="Run only the selected model workflow and skip the cross-model comparison pass.")
+    run_full_comparison = st.sidebar.checkbox(
+        "Run full model comparison",
+        value=False,
+        help="Also train and rank XGBoost, LSTM, and Prophet on this run. Considerably slower; skipped by default.",
+    )
+    skip_model_comparison = not run_full_comparison
     force_refresh = st.sidebar.checkbox("Force refresh raw-data window", value=False, help="Refetch the selected history window even if cache rows already exist.")
     rebuild_cache = st.sidebar.checkbox("Rebuild cache for selected run", value=False, help="Ignore the existing raw-data cache for this run and rebuild it from fetched data plus explicit gap filling.")
     run_clicked = st.sidebar.button("Run Pipeline", type="primary", width="stretch")
@@ -664,7 +669,7 @@ def _render_instructions(*, expanded: bool) -> None:
 **Getting started**
 
 1. Choose a region, training window, and model in the **sidebar** on the left.
-2. Optional toggles: *Skip full model comparison*, *Force refresh raw-data window*, and *Rebuild cache*.
+2. Optional toggles: *Run full model comparison*, *Force refresh raw-data window*, and *Rebuild cache*.
 3. Click **Run Pipeline** in the sidebar and keep this tab open while it works.
 4. When the run finishes, model metrics, the latest trading signal, charts, and the research summary appear on this page.
             """
@@ -676,7 +681,9 @@ def _render_instructions(*, expanded: bool) -> None:
             icon="⚠️",
         )
         st.info(
-            "For faster results, pick a **90-day** training window and tick **Skip full model comparison** in the sidebar.",
+            "The defaults are tuned for speed: a **90-day** training window with the cross-model comparison "
+            "skipped. Tick **Run full model comparison** in the sidebar only when you want the full "
+            "XGBoost / LSTM / Prophet ranking; it makes the run considerably longer.",
         )
         st.info(
             "External services can be temperamental: ENTSO-E or Hugging Face API keys may occasionally be "
